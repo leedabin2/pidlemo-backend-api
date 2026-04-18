@@ -2,51 +2,48 @@ import axios from "axios";
 import type { Coordinates, Place } from "../types";
 
 const API_KEY = process.env.KAKAO_REST_API_KEY ?? "";
-const BASE_URL = "https://dapi.kakao.com/v2/local/search/keyword.json";
-const RADIUS = 1500; // 반경 1.5km
+const CATEGORY_URL = "https://dapi.kakao.com/v2/local/search/category.json";
+const DETAIL_URL   = "https://dapi.kakao.com/v2/local/place.json"; // 영업시간 보완용
+const RADIUS = 1500;
 
-// 도보 속도: 약 80m/분
 function calcWalkingMinutes(distanceMeters: number): number {
-  return Math.round(distanceMeters / 80);
+  return Math.max(1, Math.round(distanceMeters / 80));
 }
 
-function isCurrentlyOpen(openingHours?: string): boolean {
-  if (!openingHours) return true;
-  const now = new Date();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  const current = hour * 60 + minute;
-
-  const match = openingHours.match(/(\d{2}):(\d{2})\s*[-~]\s*(\d{2}):(\d{2})/);
-  if (!match) return true;
-
-  const open = parseInt(match[1]) * 60 + parseInt(match[2]);
-  const close = parseInt(match[3]) * 60 + parseInt(match[4]);
-  return current >= open && current <= close;
-}
+const EXCLUDE_KEYWORDS = ["스터디", "독서실", "코인노래", "24시간스터디", "자습"];
 
 interface KakaoDocument {
   id: string;
   place_name: string;
   address_name: string;
   road_address_name: string;
-  x: string; // lng
-  y: string; // lat
+  x: string;
+  y: string;
   distance: string;
   category_group_code: string;
+  category_name: string;
+  place_url: string;
 }
 
-async function searchByKeyword(
-  query: string,
+interface KakaoPlaceDetail {
+  basicInfo?: {
+    openHour?: {
+      periodList?: { timeList?: { dayOfWeek: string; timeSE: string }[] }[];
+    };
+  };
+}
+
+async function searchByCategory(
+  categoryCode: "CE7" | "FD6",
   coords: Coordinates,
-  size = 5
+  size = 8
 ): Promise<KakaoDocument[]> {
   if (!API_KEY) return [];
 
-  const { data } = await axios.get(BASE_URL, {
+  const { data } = await axios.get(CATEGORY_URL, {
     headers: { Authorization: `KakaoAK ${API_KEY}` },
     params: {
-      query,
+      category_group_code: categoryCode,
       x: coords.lng,
       y: coords.lat,
       radius: RADIUS,
@@ -55,44 +52,100 @@ async function searchByKeyword(
     },
   });
 
-  return data.documents ?? [];
+  const docs: KakaoDocument[] = data.documents ?? [];
+  return docs.filter(
+    (doc) => !EXCLUDE_KEYWORDS.some((kw) => doc.place_name.includes(kw))
+  );
+}
+
+// B안: Kakao Place Detail로 영업시간 보완 (상위 몇 개만)
+async function fetchOperatingHours(placeId: string): Promise<string | null> {
+  if (!API_KEY) return null;
+  try {
+    const { data } = await axios.get<KakaoPlaceDetail>(DETAIL_URL, {
+      headers: { Authorization: `KakaoAK ${API_KEY}` },
+      params: { id: placeId },
+    });
+    const periods = data.basicInfo?.openHour?.periodList;
+    if (!periods?.length) return null;
+
+    // 오늘 요일에 해당하는 시간 찾기
+    const dayNames = ["일", "월", "화", "수", "목", "금", "토"];
+    const today = dayNames[new Date().getDay()];
+    for (const period of periods) {
+      for (const time of period.timeList ?? []) {
+        if (time.dayOfWeek.includes(today)) {
+          // timeSE 형식: "0900~2100" → "09:00-21:00"
+          const m = time.timeSE.match(/(\d{2})(\d{2})~(\d{2})(\d{2})/);
+          if (m) return `${m[1]}:${m[2]}-${m[3]}:${m[4]}`;
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function isOpenNow(operatingHours: string): boolean {
+  const m = operatingHours.match(/(\d{2}):(\d{2})-(\d{2}):(\d{2})/);
+  if (!m) return true;
+  const now = new Date().getHours() * 60 + new Date().getMinutes();
+  const open  = parseInt(m[1]) * 60 + parseInt(m[2]);
+  const close = parseInt(m[3]) * 60 + parseInt(m[4]);
+  return now >= open && now <= close;
+}
+
+// C안: 카카오맵 장소 링크
+function kakaoMapUrl(placeId: string): string {
+  return `https://place.map.kakao.com/${placeId}`;
+}
+
+async function docsToPlaces(
+  docs: KakaoDocument[],
+  category: Place["category"],
+  fetchHours: boolean
+): Promise<Place[]> {
+  const TOP_N = 3; // Place Detail API는 상위 3개만 호출 (rate limit 방어)
+
+  return Promise.all(
+    docs.map(async (doc, i) => {
+      const rawHours = fetchHours && i < TOP_N
+        ? await fetchOperatingHours(doc.id)
+        : null;
+
+      const defaultHours = category === "cafe" ? "09:00-21:00" : "11:00-22:00";
+      const operatingHours = rawHours ?? defaultHours;
+
+      return {
+        id: `${category}-${doc.id}`,
+        name: doc.place_name,
+        category,
+        coordinates: { lat: parseFloat(doc.y), lng: parseFloat(doc.x) },
+        address: doc.road_address_name || doc.address_name,
+        walkingMinutes: calcWalkingMinutes(parseInt(doc.distance, 10)),
+        operatingHours,
+        isOpen: isOpenNow(operatingHours),
+        kakaoMapUrl: kakaoMapUrl(doc.id),
+        tags: [],
+        source: "kakao" as const,
+      };
+    })
+  );
 }
 
 export async function getNearByCafes(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByKeyword("카페", coords, 5);
-
-  return docs.map((doc, i) => ({
-    id: `cafe-${doc.id}`,
-    name: doc.place_name,
-    category: "cafe" as const,
-    coordinates: { lat: parseFloat(doc.y), lng: parseFloat(doc.x) },
-    address: doc.road_address_name || doc.address_name,
-    walkingMinutes: calcWalkingMinutes(parseInt(doc.distance, 10)),
-    operatingHours: "09:00-21:00", // 카카오 Local API는 영업시간 미제공 → 추후 Place API로 보완
-    isOpen: i < 3, // 간단한 임시 처리 (실제는 Place detail API 필요)
-    tags: [],
-    source: "kakao" as const,
-  }));
+  const docs = await searchByCategory("CE7", coords, 8);
+  console.log(`[kakao] 카페 검색 결과: ${docs.length}개`);
+  return docsToPlaces(docs.slice(0, 5), "cafe", true);
 }
 
 export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByKeyword("맛집", coords, 5);
-
-  return docs.map((doc) => ({
-    id: `restaurant-${doc.id}`,
-    name: doc.place_name,
-    category: "restaurant" as const,
-    coordinates: { lat: parseFloat(doc.y), lng: parseFloat(doc.x) },
-    address: doc.road_address_name || doc.address_name,
-    walkingMinutes: calcWalkingMinutes(parseInt(doc.distance, 10)),
-    operatingHours: "11:00-22:00",
-    isOpen: isCurrentlyOpen("11:00-22:00"),
-    tags: [],
-    source: "kakao" as const,
-  }));
+  const docs = await searchByCategory("FD6", coords, 8);
+  console.log(`[kakao] 음식점 검색 결과: ${docs.length}개`);
+  return docsToPlaces(docs.slice(0, 5), "restaurant", true);
 }
 
-// API 키 없을 때 개발용 목업
 export function getMockCafes(coords: Coordinates): Place[] {
   return [
     {
@@ -104,6 +157,7 @@ export function getMockCafes(coords: Coordinates): Place[] {
       walkingMinutes: 5,
       operatingHours: "08:00-21:00",
       isOpen: true,
+      kakaoMapUrl: "https://place.map.kakao.com/26338954",
       representativeMenus: [
         { name: "아이스 아메리카노", price: 5500 },
         { name: "뉴올리언스 아이스", price: 7500 },
@@ -120,6 +174,7 @@ export function getMockCafes(coords: Coordinates): Place[] {
       walkingMinutes: 10,
       operatingHours: "07:00-22:00",
       isOpen: true,
+      kakaoMapUrl: "https://place.map.kakao.com/8137464",
       representativeMenus: [
         { name: "아이스 아메리카노", price: 4500 },
         { name: "카페라떼", price: 5000 },

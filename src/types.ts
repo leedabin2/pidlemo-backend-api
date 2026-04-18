@@ -17,6 +17,7 @@ export interface Place {
   representativeMenus?: { name: string; price: number }[];
   tags: string[];
   source: "kakao" | "public_data";
+  kakaoMapUrl?: string;
   score?: number;
 }
 
