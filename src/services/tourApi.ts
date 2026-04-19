@@ -1,5 +1,6 @@
 import axios from "axios";
 import type { Coordinates, Place } from "../types";
+import { getOpenStateNow } from "../utils/openHours";
 
 const API_KEY = process.env.TOUR_API_KEY ?? "";
 const BASE_URL = "https://apis.data.go.kr/B551011/KorService1";
@@ -135,7 +136,7 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
         address: item.addr1,
         walkingMinutes: calcWalkingMinutes(dist),
         operatingHours: "상시",
-        isOpen: true,
+        isOpen: getOpenStateNow("상시"),
         tags: ["관광지"],
         source: "public_data" as const,
       };
@@ -166,7 +167,7 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
         address: item.addr1,
         walkingMinutes: calcWalkingMinutes(dist),
         operatingHours: "운영시간 확인 필요",
-        isOpen: true,
+        isOpen: getOpenStateNow("운영시간 확인 필요"),
         tags: ["문화시설"],
         source: "public_data" as const,
       };
@@ -202,7 +203,11 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
           operatingHours: item.eventstartdate && item.eventenddate
             ? `${item.eventstartdate.slice(0,4)}.${item.eventstartdate.slice(4,6)}.${item.eventstartdate.slice(6)} ~ ${item.eventenddate.slice(0,4)}.${item.eventenddate.slice(4,6)}.${item.eventenddate.slice(6)}`
             : "기간 확인 필요",
-          isOpen: true,
+          isOpen: getOpenStateNow(
+            item.eventstartdate && item.eventenddate
+              ? `${item.eventstartdate.slice(0,4)}.${item.eventstartdate.slice(4,6)}.${item.eventstartdate.slice(6)} ~ ${item.eventenddate.slice(0,4)}.${item.eventenddate.slice(4,6)}.${item.eventenddate.slice(6)}`
+              : "기간 확인 필요"
+          ),
           tags,
           source: "public_data" as const,
         };
@@ -225,7 +230,7 @@ export function getMockAttractions(coords: Coordinates): Place[] {
       address: "서울 마포구 망원동 한강",
       walkingMinutes: 18,
       operatingHours: "24시간",
-      isOpen: true,
+      isOpen: getOpenStateNow("24시간"),
       tags: ["야외"],
       source: "public_data",
     },
@@ -242,7 +247,7 @@ export function getMockFestivals(coords: Coordinates): Place[] {
       address: "서울 마포구 망원동",
       walkingMinutes: 12,
       operatingHours: "11:00-20:00",
-      isOpen: true,
+      isOpen: getOpenStateNow("11:00-20:00"),
       tags: ["오늘 마감"],
       source: "public_data",
     },
@@ -254,7 +259,7 @@ export function getMockFestivals(coords: Coordinates): Place[] {
       address: "서울 마포구 서교동",
       walkingMinutes: 18,
       operatingHours: "10:00-21:00",
-      isOpen: true,
+      isOpen: getOpenStateNow("10:00-21:00"),
       tags: ["3일 남음"],
       source: "public_data",
     },

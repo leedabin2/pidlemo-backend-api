@@ -23,13 +23,17 @@ export async function getWeather(coords: Coordinates): Promise<WeatherInfo> {
   const code: number = data.weather[0].id;
   const main: string = data.weather[0].main;
 
+  const feelsLike = Math.round(data.main.feels_like);
+  console.log(`[weather] code=${code} temp=${Math.round(data.main.temp)}°C feelsLike=${feelsLike}°C desc=${data.weather[0].description}`);
+
   return {
     code,
     main,
     description: data.weather[0].description,
     temp: Math.round(data.main.temp),
-    isRainy: code >= 200 && code < 700,  // 뇌우/비/눈/안개
-    isSunny: code >= 800,                // 맑음/구름 조금
+    feelsLike,
+    isRainy: code >= 200 && code < 700,
+    isSunny: code >= 800,
   };
 }
 
@@ -39,6 +43,7 @@ function mockWeather(): WeatherInfo {
     main: "Clear",
     description: "맑음",
     temp: 22,
+    feelsLike: 22,
     isRainy: false,
     isSunny: true,
   };

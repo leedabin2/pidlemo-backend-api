@@ -1,5 +1,6 @@
 import axios from "axios";
 import type { Coordinates, Place } from "../types";
+import { getOpenStateNow } from "../utils/openHours";
 
 const API_KEY = process.env.PUBLIC_DATA_API_KEY ?? "";
 
@@ -73,7 +74,7 @@ export async function getNearByPopups(coords: Coordinates): Promise<Place[]> {
           address: item.PLACE ?? "",
           walkingMinutes: calcWalkingMinutes(dist),
           operatingHours: `${item.STRTDATE} ~ ${item.END_DATE}`,
-          isOpen: true,
+          isOpen: getOpenStateNow(`${item.STRTDATE} ~ ${item.END_DATE}`),
           tags,
           source: "public_data" as const,
         };
@@ -111,7 +112,7 @@ export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
           address: item.ADDR ?? "",
           walkingMinutes: calcWalkingMinutes(dist),
           operatingHours: "24시간",
-          isOpen: true,
+          isOpen: getOpenStateNow("24시간"),
           tags: ["야외"],
           source: "public_data" as const,
         };
@@ -136,7 +137,7 @@ export function getMockPopups(coords: Coordinates): Place[] {
       address: "서울 마포구 망원동",
       walkingMinutes: 12,
       operatingHours: "11:00-20:00",
-      isOpen: true,
+      isOpen: getOpenStateNow("11:00-20:00"),
       tags: ["오늘 마감"],
       source: "public_data",
     },
@@ -148,7 +149,7 @@ export function getMockPopups(coords: Coordinates): Place[] {
       address: "서울 마포구 서교동",
       walkingMinutes: 18,
       operatingHours: "12:00-21:00",
-      isOpen: true,
+      isOpen: getOpenStateNow("12:00-21:00"),
       tags: ["3일 남음"],
       source: "public_data",
     },
@@ -165,7 +166,7 @@ export function getMockParks(coords: Coordinates): Place[] {
       address: "서울 마포구 망원동 한강",
       walkingMinutes: 18,
       operatingHours: "24시간",
-      isOpen: true,
+      isOpen: getOpenStateNow("24시간"),
       tags: ["야외"],
       source: "public_data",
     },
