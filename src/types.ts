@@ -3,7 +3,12 @@ export interface Coordinates {
   lng: number;
 }
 
-export type PlaceCategory = "cafe" | "popup" | "park" | "exhibition" | "restaurant" | "shopping";
+export type PlaceCategory =
+  | "cafe" | "popup" | "park" | "exhibition" | "restaurant" | "shopping"
+  | "bar"     // 술집/바/이자카야
+  | "photo"   // 포토부스
+  | "nature"  // 자연 (등산·바다·오름·목장·식물원)
+  | "cinema"; // 영화관
 
 export interface Place {
   id: string;
@@ -15,11 +20,16 @@ export interface Place {
   operatingHours: string;
   isOpen: boolean | null;
   representativeMenus?: { name: string; price: number }[];
-  subCategory?: string;  // 카카오 category_name 파싱값 (예: "한식", "커피전문점")
+  subCategory?: string;
   tags: string[];
   source: "kakao" | "public_data";
   kakaoMapUrl?: string;
   score?: number;
+  // Google Places 보강 정보
+  googleRating?: number;          // 1.0 ~ 5.0
+  googleReviewCount?: number;     // 리뷰 수
+  priceLevel?: 0 | 1 | 2 | 3 | 4; // 0=무료, 1=저렴, 2=보통, 3=비쌈, 4=매우 비쌈
+  photoUrl?: string;              // 대표 이미지 URL
 }
 
 export interface PlaceGroup {
@@ -34,6 +44,8 @@ export interface Course {
   durationMinutes: number;
   places: Place[];
   tags: string[];
+  weatherHint?: string;
+  isPopular?: boolean; // 인기 코스 배지
 }
 
 export interface RecommendQuery {
@@ -53,4 +65,12 @@ export interface WeatherInfo {
   feelsLike: number;   // 체감온도
   isRainy: boolean;
   isSunny: boolean;
+}
+
+// 3시간 단위 예보 엔트리
+export interface ForecastEntry {
+  offsetHours: number; // 현재로부터 몇 시간 뒤
+  isRainy: boolean;
+  isSunny: boolean;
+  feelsLike: number;
 }

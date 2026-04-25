@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import recommendRouter from "./routes/recommend";
+import routeRouter from "./routes/route";
 
 const app = express();
 const PORT = process.env.PORT ?? 4000;
@@ -14,6 +15,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/recommend", recommendRouter);
+app.use("/api/route", routeRouter);
 
 app.listen(PORT, () => {
   console.log(`\n🚀 피들모 백엔드 실행 중: http://localhost:${PORT}`);

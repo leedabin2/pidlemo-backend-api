@@ -1,8 +1,8 @@
-import type { Coordinates, Course, Place, WeatherInfo } from "../types";
+import type { Coordinates, Course, ForecastEntry, Place, WeatherInfo } from "../types";
 import { getOpenStateAtOffset } from "./openHours";
 
 type WeatherCondition = "실내전용" | "실내선호" | "쾌적" | "야외최적";
-type TimeSlot = "morning" | "lunch" | "afternoon" | "evening" | "night";
+type TimeSlot = "dawn" | "morning" | "lunch" | "afternoon" | "evening" | "night";
 type EnvironmentPreference = "실내" | "야외" | "상관없음";
 
 interface CourseTemplate {
@@ -38,6 +38,10 @@ const STAY_TIME: Record<Place["category"], number> = {
   park: 50,
   restaurant: 65,
   shopping: 40,
+  bar: 90,
+  photo: 30,
+  nature: 120,
+  cinema: 130,
 };
 
 const CATEGORY_LABEL: Record<Place["category"], string> = {
@@ -47,22 +51,33 @@ const CATEGORY_LABEL: Record<Place["category"], string> = {
   park: "공원 산책",
   restaurant: "맛집",
   shopping: "소품샵",
+  bar: "바/이자카야",
+  photo: "포토부스",
+  nature: "자연",
+  cinema: "영화관",
 };
 
+// 9~22시(morning/lunch/afternoon/evening)에 행사/팝업/전시 우선
 const CATEGORY_ORDER_BY_SLOT: Record<TimeSlot, Place["category"][]> = {
-  morning: ["cafe", "park", "exhibition", "popup", "shopping", "restaurant"],
-  lunch: ["restaurant", "cafe", "popup", "exhibition", "shopping", "park"],
-  afternoon: ["shopping", "cafe", "popup", "exhibition", "park", "restaurant"],
-  evening: ["restaurant", "shopping", "popup", "cafe", "park", "exhibition"],
-  night: ["restaurant", "cafe", "shopping", "popup", "exhibition", "park"],
+  dawn:      ["park", "cafe", "exhibition", "shopping", "popup", "restaurant", "nature", "photo", "bar", "cinema"],
+  morning:   ["popup", "exhibition", "cafe", "park", "shopping", "restaurant", "photo", "nature", "cinema", "bar"],
+  lunch:     ["restaurant", "popup", "exhibition", "cafe", "shopping", "park", "photo", "cinema", "nature", "bar"],
+  afternoon: ["popup", "exhibition", "shopping", "cafe", "park", "restaurant", "photo", "cinema", "nature", "bar"],
+  evening:   ["restaurant", "popup", "exhibition", "bar", "shopping", "cafe", "park", "photo", "cinema", "nature"],
+  night:     ["bar", "restaurant", "cafe", "cinema", "shopping", "popup", "exhibition", "photo", "nature", "park"],
 };
 
 const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
+  dawn: [
+    { categories: ["park", "cafe"], title: "새벽 산책 코스 추천!" },
+    { categories: ["park"], title: "새벽 공원 산책 추천!" },
+  ],
   morning: [
     { categories: ["cafe", "park", "exhibition"], title: "아침 산책 코스 추천!" },
     { categories: ["cafe", "exhibition", "popup"], title: "느긋한 문화 코스 추천!" },
     { categories: ["shopping", "cafe", "park"], title: "가볍게 둘러보는 오전 코스 추천!" },
     { categories: ["park", "cafe", "popup"], title: "가볍게 걷는 코스 추천!" },
+    { categories: ["cafe", "photo", "shopping"], title: "감성 오전 코스 추천!" },
     { categories: ["exhibition", "cafe", "park"], title: "조용한 오전 코스 추천!" },
     { categories: ["cafe", "popup"], title: "가볍게 시작하는 코스 추천!" },
   ],
@@ -71,6 +86,7 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["restaurant", "exhibition", "cafe"], title: "문화 충전 코스 추천!" },
     { categories: ["restaurant", "park", "cafe"], title: "식사 후 산책 코스 추천!" },
     { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!" },
+    { categories: ["restaurant", "photo", "cafe"], title: "맛집 후 감성 코스 추천!" },
     { categories: ["popup", "restaurant", "cafe"], title: "놀거리 많은 코스 추천!" },
     { categories: ["restaurant", "cafe"], title: "짧고 깔끔한 점심 코스 추천!" },
   ],
@@ -79,21 +95,27 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["cafe", "popup", "park"], title: "가볍게 돌아다니는 코스 추천!" },
     { categories: ["exhibition", "cafe", "popup"], title: "놀거리 많은 코스 추천!" },
     { categories: ["park", "cafe", "restaurant"], title: "햇살 좋은 힐링 코스 추천!" },
+    { categories: ["cafe", "photo", "shopping"], title: "감성 오후 코스 추천!" },
+    { categories: ["cinema", "cafe"], title: "영화 데이트 코스 추천!" },
     { categories: ["popup", "cafe", "exhibition"], title: "트렌디한 오후 코스 추천!" },
     { categories: ["cafe", "exhibition"], title: "차분한 실내 코스 추천!" },
   ],
   evening: [
+    { categories: ["restaurant", "bar", "cafe"], title: "저녁 감성 코스 추천!" },
     { categories: ["cafe", "restaurant", "park"], title: "테라스 감성 코스 추천!" },
     { categories: ["restaurant", "park", "cafe"], title: "퇴근 후 힐링 코스 추천!" },
     { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!" },
     { categories: ["restaurant", "popup", "cafe"], title: "놀거리 많은 저녁 코스 추천!" },
+    { categories: ["restaurant", "cinema"], title: "영화관 데이트 코스 추천!" },
     { categories: ["restaurant", "exhibition", "cafe"], title: "저녁 문화 코스 추천!" },
     { categories: ["popup", "restaurant", "cafe"], title: "데이트 느낌 코스 추천!" },
     { categories: ["restaurant", "cafe"], title: "퇴근 후 가볍게 코스 추천!" },
   ],
   night: [
-    { categories: ["restaurant", "popup"], title: "밤까지 즐기는 코스 추천!" },
+    { categories: ["restaurant", "bar"], title: "밤까지 즐기는 코스 추천!" },
+    { categories: ["bar", "cafe"], title: "야간 감성 코스 추천!" },
     { categories: ["restaurant", "cafe"], title: "늦은 시간 편한 코스 추천!" },
+    { categories: ["cinema", "restaurant"], title: "심야 영화 코스 추천!" },
     { categories: ["shopping", "cafe"], title: "늦게까지 구경하는 코스 추천!" },
     { categories: ["cafe", "popup"], title: "가볍게 마무리 코스 추천!" },
     { categories: ["restaurant", "exhibition"], title: "야간 실내 코스 추천!" },
@@ -101,7 +123,7 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
   ],
 };
 
-const PARK_FALLBACKS: Place["category"][] = ["exhibition", "popup", "shopping", "cafe"];
+const PARK_FALLBACKS: Place["category"][] = ["exhibition", "popup", "shopping", "cafe", "cinema", "photo"];
 
 function normalizeOptions(options?: RecommendationOptions): NormalizedOptions {
   const durationBudgetMinutes = (() => {
@@ -135,7 +157,7 @@ function getDesiredStopCount(options: NormalizedOptions): number {
 }
 
 function isIndoorCategory(category: Place["category"]): boolean {
-  return category !== "park";
+  return category !== "park" && category !== "nature";
 }
 
 function calcTravelMinutes(from: Coordinates, to: Coordinates): number {
@@ -162,7 +184,8 @@ function dedupeTemplates(templates: CourseTemplate[]): CourseTemplate[] {
 }
 
 function getTimeSlot(hour: number): TimeSlot {
-  if (hour >= 7 && hour < 11) return "morning";
+  if (hour >= 0 && hour < 6) return "dawn";
+  if (hour >= 6 && hour < 11) return "morning";
   if (hour >= 11 && hour < 14) return "lunch";
   if (hour >= 14 && hour < 17) return "afternoon";
   if (hour >= 17 && hour < 21) return "evening";
@@ -299,24 +322,29 @@ function applyPreferencesToTemplate(
 
 function weatherScore(category: Place["category"], condition: WeatherCondition): number {
   const table: Record<WeatherCondition, Partial<Record<Place["category"], number>>> = {
-    야외최적: { park: 32, cafe: 25, popup: 22, restaurant: 20, exhibition: 15, shopping: 18 },
-    쾌적: { park: 24, cafe: 22, popup: 22, restaurant: 20, exhibition: 20, shopping: 20 },
-    실내선호: { cafe: 28, exhibition: 28, popup: 24, restaurant: 22, park: 5, shopping: 27 },
-    실내전용: { cafe: 30, exhibition: 30, popup: 25, restaurant: 24, park: 0, shopping: 28 },
+    야외최적: { park: 32, cafe: 25, popup: 22, restaurant: 20, exhibition: 15, shopping: 18, nature: 35, bar: 10, photo: 18, cinema: 12 },
+    쾌적:    { park: 24, cafe: 22, popup: 22, restaurant: 20, exhibition: 20, shopping: 20, nature: 26, bar: 16, photo: 20, cinema: 18 },
+    실내선호: { cafe: 28, exhibition: 28, popup: 24, restaurant: 22, park: 5, shopping: 27, nature: 5, bar: 22, photo: 24, cinema: 28 },
+    실내전용: { cafe: 30, exhibition: 30, popup: 25, restaurant: 24, park: 0, shopping: 28, nature: 0, bar: 24, photo: 26, cinema: 30 },
   };
   return table[condition][category] ?? 15;
 }
 
 function timeScore(category: Place["category"], slot: TimeSlot): number {
+  // popup/exhibition: 9~22시(morning~evening) 집중 부스트
   const table: Record<Place["category"], Record<TimeSlot, number>> = {
-    cafe: { morning: 20, lunch: 12, afternoon: 20, evening: 12, night: 8 },
-    restaurant: { morning: 5, lunch: 20, afternoon: 12, evening: 20, night: 16 },
-    popup: { morning: 10, lunch: 15, afternoon: 20, evening: 18, night: 12 },
-    exhibition: { morning: 12, lunch: 14, afternoon: 20, evening: 16, night: 8 },
-    park: { morning: 18, lunch: 14, afternoon: 20, evening: 16, night: 5 },
-    shopping: { morning: 10, lunch: 14, afternoon: 22, evening: 18, night: 10 },
+    cafe:       { dawn: 2,  morning: 20, lunch: 12, afternoon: 20, evening: 12, night: 8  },
+    restaurant: { dawn: 0,  morning: 5,  lunch: 22, afternoon: 14, evening: 22, night: 16 },
+    popup:      { dawn: 0,  morning: 20, lunch: 22, afternoon: 24, evening: 22, night: 10 },
+    exhibition: { dawn: 0,  morning: 20, lunch: 22, afternoon: 24, evening: 20, night: 6  },
+    park:       { dawn: 20, morning: 18, lunch: 14, afternoon: 20, evening: 16, night: 5  },
+    shopping:   { dawn: 0,  morning: 10, lunch: 14, afternoon: 22, evening: 18, night: 10 },
+    bar:        { dawn: 5,  morning: 0,  lunch: 0,  afternoon: 5,  evening: 22, night: 30 },
+    photo:      { dawn: 0,  morning: 14, lunch: 18, afternoon: 22, evening: 20, night: 14 },
+    nature:     { dawn: 18, morning: 22, lunch: 16, afternoon: 18, evening: 14, night: 2  },
+    cinema:     { dawn: 0,  morning: 10, lunch: 14, afternoon: 22, evening: 20, night: 18 },
   };
-  return table[category][slot];
+  return table[category]?.[slot] ?? 10;
 }
 
 function preferenceScore(category: Place["category"], options: NormalizedOptions): number {
@@ -337,12 +365,65 @@ function preferenceScore(category: Place["category"], options: NormalizedOptions
   return score;
 }
 
+// 예보 엔트리에서 날씨 조건 계산
+function conditionFromForecast(entry: ForecastEntry): WeatherCondition {
+  if (entry.isRainy) return "실내전용";
+  const fl = entry.feelsLike;
+  if (fl >= 33 || fl <= 5) return "실내전용";
+  if (fl >= 28 || fl <= 12) return "실내선호";
+  if (entry.isSunny && fl >= 18 && fl <= 27) return "야외최적";
+  return "쾌적";
+}
+
+// 도착 예정 시간(elapsedMinutes 후)의 날씨 조건 반환
+function getConditionAtOffset(
+  base: WeatherCondition,
+  elapsedMinutes: number,
+  forecast: ForecastEntry[] | undefined
+): WeatherCondition {
+  if (!forecast?.length) return base;
+  const offsetHours = elapsedMinutes / 60;
+  const entry = forecast.reduce((prev, curr) =>
+    Math.abs(curr.offsetHours - offsetHours) < Math.abs(prev.offsetHours - offsetHours)
+      ? curr
+      : prev
+  );
+  // 예보가 4시간 이상 벗어나면 현재 날씨 사용
+  if (Math.abs(entry.offsetHours - offsetHours) > 4) return base;
+  return conditionFromForecast(entry);
+}
+
+function ratingScore(place: Place): number {
+  // 카페/맛집만 별점·리뷰 수 반영
+  if (place.category !== "cafe" && place.category !== "restaurant") return 0;
+
+  let score = 0;
+  const { googleRating, googleReviewCount } = place;
+
+  if (googleRating !== undefined) {
+    if (googleRating >= 4.5) score += 18;
+    else if (googleRating >= 4.2) score += 12;
+    else if (googleRating >= 4.0) score += 8;
+    else if (googleRating >= 3.5) score += 3;
+    else score -= 5;
+  }
+
+  if (googleReviewCount !== undefined) {
+    if (googleReviewCount >= 1000) score += 8;
+    else if (googleReviewCount >= 500) score += 5;
+    else if (googleReviewCount >= 100) score += 2;
+  }
+
+  return score;
+}
+
 export function scorePlace(place: Place, ctx: ScoreContext): number {
   let score = 0;
   score += Math.max(0, ((30 - place.walkingMinutes) / 30) * 40);
   score += weatherScore(place.category, ctx.condition);
   score += timeScore(place.category, getTimeSlot(ctx.hourOfDay));
   score += preferenceScore(place.category, ctx.preferences);
+  score += ratingScore(place); // 구글 별점/리뷰 수 반영
 
   if (place.tags.some((tag) => tag.includes("마감") || tag.includes("남음"))) {
     score += 10;
@@ -352,13 +433,25 @@ export function scorePlace(place: Place, ctx: ScoreContext): number {
     score -= 10;
   }
 
+  // 새벽(0-5시): 영업시간 모르는 장소 강한 패널티
+  const isDawn = ctx.hourOfDay >= 0 && ctx.hourOfDay < 6;
+  if (isDawn && place.isOpen === null) {
+    score -= 30;
+  }
+  // 24시간/상시 확인된 장소 새벽 부스트
+  if (isDawn && place.isOpen === true) {
+    score += 15;
+  }
+
   return Math.round(score);
 }
 
 function routeCandidateScore(
   candidate: Place,
   lastPlace: Place | null,
-  elapsedMinutes: number
+  elapsedMinutes: number,
+  baseCondition: WeatherCondition,
+  forecast: ForecastEntry[] | undefined
 ): number {
   const travelMinutes = lastPlace
     ? calcTravelMinutes(lastPlace.coordinates, candidate.coordinates)
@@ -373,13 +466,23 @@ function routeCandidateScore(
   if (openAtArrival === false) score -= 40;
   if (lastPlace && lastPlace.category === candidate.category) score -= 6;
 
+  // 동적 날씨: 도착 예정 시각의 예보 날씨가 현재와 다르면 delta 반영
+  const conditionAtArrival = getConditionAtOffset(baseCondition, arrivalOffset, forecast);
+  if (conditionAtArrival !== baseCondition) {
+    const delta = weatherScore(candidate.category, conditionAtArrival)
+                - weatherScore(candidate.category, baseCondition);
+    score += delta;
+  }
+
   return score;
 }
 
 function buildCourseFromTemplate(
   sorted: Place[],
   template: Place["category"][],
-  excludedIds: Set<string>
+  excludedIds: Set<string>,
+  baseCondition: WeatherCondition,
+  forecast: ForecastEntry[] | undefined
 ): Place[] {
   const result: Place[] = [];
   const usedIds = new Set<string>();
@@ -387,6 +490,9 @@ function buildCourseFromTemplate(
   let lastPlace: Place | null = null;
 
   for (const category of template) {
+    const scoreCandidate = (p: Place) =>
+      routeCandidateScore(p, lastPlace, elapsedMinutes, baseCondition, forecast);
+
     const filterCandidates = (ignoreExcluded: boolean) =>
       sorted
       .filter((place) =>
@@ -394,7 +500,7 @@ function buildCourseFromTemplate(
         !usedIds.has(place.id) &&
         (ignoreExcluded || !excludedIds.has(place.id))
       )
-      .sort((a, b) => routeCandidateScore(b, lastPlace, elapsedMinutes) - routeCandidateScore(a, lastPlace, elapsedMinutes));
+      .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
 
     const candidates = filterCandidates(false);
     const pool = candidates.length > 0 ? candidates : filterCandidates(true);
@@ -502,11 +608,12 @@ function buildTags(
     실내전용: "실내 전용",
   };
   const slotTag: Record<TimeSlot, string> = {
-    morning: "오전 추천",
-    lunch: "점심 추천",
+    dawn:      "새벽 추천",
+    morning:   "오전 추천",
+    lunch:     "점심 추천",
     afternoon: "오후 추천",
-    evening: "저녁 추천",
-    night: "야간 추천",
+    evening:   "저녁 추천",
+    night:     "야간 추천",
   };
 
   tags.push(conditionTag[condition], slotTag[slot]);
@@ -542,11 +649,56 @@ function pickDiversePlaces(places: Place[], count: number): Place[] {
   return result;
 }
 
+function generateWeatherHint(
+  places: Place[],
+  weather: WeatherInfo,
+  hourOfDay: number,
+  forecast: ForecastEntry[] | undefined
+): string | undefined {
+  if (!forecast?.length) return undefined;
+
+  const hasOutdoor = places.some((p) => p.category === "park");
+  const allRainy = weather.isRainy && forecast.every((e) => e.isRainy);
+
+  // 종일 비 경고
+  if (allRainy) {
+    return hasOutdoor
+      ? "종일 비 예보가 있어요. 공원 방문은 어려울 수 있어요 ☔"
+      : "종일 비 예보가 있어요. 실내 코스를 추천드려요 ☔";
+  }
+
+  // 현재 비 → 예보에서 비 그칠 예정
+  if (weather.isRainy) {
+    const clearEntry = forecast.find((e) => !e.isRainy);
+    if (clearEntry) {
+      const targetHour = (hourOfDay + clearEntry.offsetHours) % 24;
+      const timeLabel = `${targetHour}시`;
+      if (hasOutdoor) {
+        return `${timeLabel}쯤 비가 그칠 예정이에요. 공원 동선에 참고하세요 ☀️`;
+      }
+      return `${timeLabel}쯤 비가 그칠 예정이에요 ☀️`;
+    }
+    return undefined;
+  }
+
+  // 현재 맑음 → 예보에서 비 예정
+  if (!weather.isRainy && hasOutdoor) {
+    const rainEntry = forecast.find((e) => e.isRainy);
+    if (rainEntry && rainEntry.offsetHours <= 3) {
+      const targetHour = (hourOfDay + rainEntry.offsetHours) % 24;
+      return `${targetHour}시쯤 비가 올 수 있어요. 공원은 서둘러 방문하세요 ☔`;
+    }
+  }
+
+  return undefined;
+}
+
 export function buildCourses(
   scoredPlaces: Place[],
   weather: WeatherInfo,
   hour: number = new Date().getHours(),
-  options?: RecommendationOptions
+  options?: RecommendationOptions,
+  forecast?: ForecastEntry[]
 ): Course[] {
   const normalized = normalizeOptions(options);
   const condition = getWeatherCondition(weather, normalized.weatherAware);
@@ -564,7 +716,7 @@ export function buildCourses(
   for (const rawTemplate of templates) {
     const template = applyPreferencesToTemplate(rawTemplate, condition, normalized);
     const places = limitCourseByDuration(
-      buildCourseFromTemplate(sorted, template.categories, usedPlaceIdsAcrossCourses),
+      buildCourseFromTemplate(sorted, template.categories, usedPlaceIdsAcrossCourses, condition, forecast),
       normalized
     );
     if (places.length < 2) continue;
@@ -572,12 +724,15 @@ export function buildCourses(
 
     const title = makeUniqueTitle(template.title, places, existingTitles);
 
+    const weatherHint = generateWeatherHint(places, weather, hour, forecast);
+
     courses.push({
       id: `course-${courses.length + 1}`,
       title,
       durationMinutes: calcDuration(places),
       places,
       tags: buildTags(condition, slot, places, normalized),
+      weatherHint,
     });
 
     existingTitles.add(title);
@@ -587,7 +742,8 @@ export function buildCourses(
   }
 
   const fallbackCount = getDesiredStopCount(normalized);
-  while (courses.length < 3) {
+  const minCourses = slot === "dawn" ? 0 : 3; // 새벽은 강제 최소 코스 없음
+  while (courses.length < minCourses) {
     const usedIds = new Set(courses.flatMap((course) => course.places.map((place) => place.id)));
     const fallbackPlaces = pickDiversePlaces(
       sorted.filter((place) => !usedIds.has(place.id)),
@@ -607,6 +763,7 @@ export function buildCourses(
       durationMinutes: calcDuration(fallbackPlaces),
       places: fallbackPlaces,
       tags: buildTags(condition, slot, fallbackPlaces, normalized),
+      weatherHint: generateWeatherHint(fallbackPlaces, weather, hour, forecast),
     });
     existingTitles.add(title);
   }

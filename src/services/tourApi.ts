@@ -5,6 +5,17 @@ import { getOpenStateNow } from "../utils/openHours";
 const API_KEY = process.env.TOUR_API_KEY ?? "";
 const BASE_URL = "https://apis.data.go.kr/B551011/KorService1";
 
+// 24시간 캐시
+interface CacheEntry<T> { data: T; expiresAt: number }
+const attractionCache = new Map<string, CacheEntry<Place[]>>();
+const cultureCache = new Map<string, CacheEntry<Place[]>>();
+const festivalCache = new Map<string, CacheEntry<Place[]>>();
+const CACHE_TTL = 24 * 60 * 60 * 1000;
+
+function cacheKey(coords: Coordinates): string {
+  return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}`;
+}
+
 // 두 좌표 사이 직선거리 (미터)
 function haversineDistance(a: Coordinates, b: Coordinates): number {
   const R = 6371000;
@@ -74,22 +85,25 @@ async function fetchLocationBased(
 
 async function fetchFestivals(
   coords: Coordinates,
-  radius = 3000
+  radius = 5000
 ): Promise<TourItem[]> {
   if (!API_KEY) return [];
 
   const today = new Date();
-  const eventStartDate = today.toISOString().slice(0, 10).replace(/-/g, "");
+  // eventStartDate: 오늘 이전 시작한 행사도 포함 (진행 중인 행사 커버)
+  const eventStartDate = new Date(today);
+  eventStartDate.setDate(today.getDate() - 180); // 6개월 전 시작 행사까지
+  const dateStr = eventStartDate.toISOString().slice(0, 10).replace(/-/g, "");
 
   const { data } = await axios.get(`${BASE_URL}/searchFestival1`, {
     params: {
       serviceKey: API_KEY,
-      numOfRows: 10,
+      numOfRows: 20,
       pageNo: 1,
       MobileOS: "ETC",
       MobileApp: "pidlemo",
       _type: "json",
-      eventStartDate,
+      eventStartDate: dateStr,
       arrange: "E",
       mapX: coords.lng,
       mapY: coords.lat,
@@ -118,9 +132,13 @@ function getEventTags(endDate?: string): string[] {
 
 // ── 공원 / 관광지 (contentType 12) ──────────────────────────────
 export async function getTourAttractions(coords: Coordinates): Promise<Place[]> {
+  const key = cacheKey(coords);
+  const cached = attractionCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
   try {
-    const items = await fetchLocationBased(coords, CONTENT_TYPE.tourist, 2000, 5);
-    return items.map((item) => {
+    const items = await fetchLocationBased(coords, CONTENT_TYPE.tourist, 3000, 10);
+    const result = items.map((item) => {
       const placeCoords = {
         lat: parseFloat(item.mapy),
         lng: parseFloat(item.mapx),
@@ -141,6 +159,8 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
         source: "public_data" as const,
       };
     });
+    attractionCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
+    return result;
   } catch (err) {
     console.error("[tourApi] 관광지 조회 오류:", err);
     return [];
@@ -149,9 +169,13 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
 
 // ── 문화시설 / 전시 (contentType 14) ────────────────────────────
 export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
+  const key = cacheKey(coords);
+  const cached = cultureCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
   try {
-    const items = await fetchLocationBased(coords, CONTENT_TYPE.culture, 2000, 5);
-    return items.map((item) => {
+    const items = await fetchLocationBased(coords, CONTENT_TYPE.culture, 3000, 10);
+    const result = items.map((item) => {
       const placeCoords = {
         lat: parseFloat(item.mapy),
         lng: parseFloat(item.mapx),
@@ -172,6 +196,8 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
         source: "public_data" as const,
       };
     });
+    cultureCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
+    return result;
   } catch (err) {
     console.error("[tourApi] 문화시설 조회 오류:", err);
     return [];
@@ -180,9 +206,16 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
 
 // ── 축제/행사/팝업 (contentType 15) ─────────────────────────────
 export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
+  const key = cacheKey(coords);
+  const cached = festivalCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
   try {
-    const items = await fetchFestivals(coords, 3000);
-    return items
+    const items = await fetchFestivals(coords, 5000);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const result = items
       .map((item) => {
         const placeCoords = {
           lat: parseFloat(item.mapy),
@@ -191,7 +224,24 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
         const dist = item.dist
           ? parseInt(item.dist, 10)
           : haversineDistance(coords, placeCoords);
+
+        // 종료일이 오늘 이전이면 제외
+        if (item.eventenddate) {
+          const endStr = item.eventenddate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+          const endDate = new Date(endStr);
+          endDate.setHours(23, 59, 59);
+          if (endDate < today) return null;
+        }
+
         const tags = getEventTags(item.eventenddate);
+
+        const opStart = item.eventstartdate
+          ? `${item.eventstartdate.slice(0,4)}.${item.eventstartdate.slice(4,6)}.${item.eventstartdate.slice(6)}`
+          : "";
+        const opEnd = item.eventenddate
+          ? `${item.eventenddate.slice(0,4)}.${item.eventenddate.slice(4,6)}.${item.eventenddate.slice(6)}`
+          : "";
+        const operatingHours = opStart && opEnd ? `${opStart} ~ ${opEnd}` : "기간 확인 필요";
 
         return {
           id: `tour-festival-${item.contentid}`,
@@ -200,19 +250,16 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
           coordinates: placeCoords,
           address: item.addr1,
           walkingMinutes: calcWalkingMinutes(dist),
-          operatingHours: item.eventstartdate && item.eventenddate
-            ? `${item.eventstartdate.slice(0,4)}.${item.eventstartdate.slice(4,6)}.${item.eventstartdate.slice(6)} ~ ${item.eventenddate.slice(0,4)}.${item.eventenddate.slice(4,6)}.${item.eventenddate.slice(6)}`
-            : "기간 확인 필요",
-          isOpen: getOpenStateNow(
-            item.eventstartdate && item.eventenddate
-              ? `${item.eventstartdate.slice(0,4)}.${item.eventstartdate.slice(4,6)}.${item.eventstartdate.slice(6)} ~ ${item.eventenddate.slice(0,4)}.${item.eventenddate.slice(4,6)}.${item.eventenddate.slice(6)}`
-              : "기간 확인 필요"
-          ),
+          operatingHours,
+          isOpen: getOpenStateNow(operatingHours),
           tags,
           source: "public_data" as const,
         };
       })
-      .filter((p) => p.tags.length > 0); // 이미 종료된 행사 제외
+      .filter((p): p is NonNullable<typeof p> => p !== null) as Place[];
+
+    festivalCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
+    return result;
   } catch (err) {
     console.error("[tourApi] 행사 조회 오류:", err);
     return [];

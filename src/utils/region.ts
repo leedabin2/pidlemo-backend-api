@@ -1,5 +1,22 @@
 import type { Coordinates } from "../types";
 
+// 한국 영토 경계 (제주도 포함)
+const KOREA_BOUNDS = {
+  latMin: 33.0,
+  latMax: 38.9,
+  lngMin: 124.5,
+  lngMax: 132.0,
+};
+
+export function isKorea(coords: Coordinates): boolean {
+  return (
+    coords.lat >= KOREA_BOUNDS.latMin &&
+    coords.lat <= KOREA_BOUNDS.latMax &&
+    coords.lng >= KOREA_BOUNDS.lngMin &&
+    coords.lng <= KOREA_BOUNDS.lngMax
+  );
+}
+
 const SEOUL_BOUNDS = {
   latMin: 37.42,
   latMax: 37.70,
