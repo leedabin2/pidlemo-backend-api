@@ -30,6 +30,14 @@ export interface Place {
   googleReviewCount?: number;     // 리뷰 수
   priceLevel?: 0 | 1 | 2 | 3 | 4; // 0=무료, 1=저렴, 2=보통, 3=비쌈, 4=매우 비쌈
   photoUrl?: string;              // 대표 이미지 URL
+  googleHours?: {
+    isOpenNow: boolean;
+    closesAtMinutesFromNow: number | null;
+    periods: Array<{
+      open: { day: number; time: string };
+      close?: { day: number; time: string };
+    }>;
+  };
 }
 
 export interface PlaceGroup {

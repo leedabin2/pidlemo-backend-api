@@ -102,7 +102,7 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
   ],
   evening: [
     { categories: ["restaurant", "bar", "cafe"], title: "저녁 감성 코스 추천!" },
-    { categories: ["cafe", "restaurant", "park"], title: "테라스 감성 코스 추천!" },
+    { categories: ["restaurant", "cafe", "park"], title: "테라스 감성 코스 추천!" },
     { categories: ["restaurant", "park", "cafe"], title: "퇴근 후 힐링 코스 추천!" },
     { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!" },
     { categories: ["restaurant", "popup", "cafe"], title: "놀거리 많은 저녁 코스 추천!" },
@@ -417,6 +417,17 @@ function ratingScore(place: Place): number {
   return score;
 }
 
+function popularityScore(place: Place): number {
+  if (!place.tags.includes("인기")) return 0;
+
+  if (place.category === "cafe" || place.category === "restaurant") return 12;
+  if (place.category === "shopping" || place.category === "popup" || place.category === "exhibition") {
+    return 8;
+  }
+
+  return 5;
+}
+
 export function scorePlace(place: Place, ctx: ScoreContext): number {
   let score = 0;
   score += Math.max(0, ((30 - place.walkingMinutes) / 30) * 40);
@@ -424,6 +435,7 @@ export function scorePlace(place: Place, ctx: ScoreContext): number {
   score += timeScore(place.category, getTimeSlot(ctx.hourOfDay));
   score += preferenceScore(place.category, ctx.preferences);
   score += ratingScore(place); // 구글 별점/리뷰 수 반영
+  score += popularityScore(place); // 카카오 인기/관련도 결과 반영
 
   if (place.tags.some((tag) => tag.includes("마감") || tag.includes("남음"))) {
     score += 10;
@@ -464,6 +476,11 @@ function routeCandidateScore(
 
   if (openAtArrival === true) score += 10;
   if (openAtArrival === false) score -= 40;
+  // 영업시간 미확인 + 카페/맛집/쇼핑 → 밤 시간대 약한 패널티 (실제 닫혀있을 가능성)
+  if (openAtArrival === null && ["cafe", "restaurant", "shopping", "bar"].includes(candidate.category)) {
+    const hour = new Date().getHours();
+    if (hour >= 21 || hour < 9) score -= 12;
+  }
   if (lastPlace && lastPlace.category === candidate.category) score -= 6;
 
   // 동적 날씨: 도착 예정 시각의 예보 날씨가 현재와 다르면 delta 반영
@@ -498,6 +515,7 @@ function buildCourseFromTemplate(
       .filter((place) =>
         place.category === category &&
         !usedIds.has(place.id) &&
+        place.isOpen !== false &&
         (ignoreExcluded || !excludedIds.has(place.id))
       )
       .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
@@ -746,7 +764,7 @@ export function buildCourses(
   while (courses.length < minCourses) {
     const usedIds = new Set(courses.flatMap((course) => course.places.map((place) => place.id)));
     const fallbackPlaces = pickDiversePlaces(
-      sorted.filter((place) => !usedIds.has(place.id)),
+      sorted.filter((place) => !usedIds.has(place.id) && place.isOpen !== false),
       fallbackCount
     );
     if (fallbackPlaces.length < 2) break;

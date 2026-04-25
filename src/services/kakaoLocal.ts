@@ -166,10 +166,15 @@ export async function getNearByCafes(coords: Coordinates): Promise<Place[]> {
   return docsToPlaces(filtered.slice(0, 5), "cafe");
 }
 
+const RESTAURANT_EXCLUDE_CATEGORY_KW = ["베이커리", "제과", "빵", "케이크", "디저트", "패스트푸드", "분식"];
+
 export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByCategory("FD6", coords, 8);
-  console.log(`[kakao] 음식점 검색 결과: ${docs.length}개`);
-  return docsToPlaces(docs.slice(0, 5), "restaurant");
+  const docs = await searchByCategory("FD6", coords, 10);
+  const filtered = docs.filter(
+    (doc) => !RESTAURANT_EXCLUDE_CATEGORY_KW.some((kw) => doc.category_name.includes(kw))
+  );
+  console.log(`[kakao] 음식점 검색 결과: ${docs.length}개 → 베이커리/분식 제외 후 ${filtered.length}개`);
+  return docsToPlaces(filtered.slice(0, 5), "restaurant");
 }
 
 export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Place[]> {

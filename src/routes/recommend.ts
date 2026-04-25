@@ -86,6 +86,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
           googleReviewCount: reviewCount ?? undefined,
           priceLevel: priceLevel ?? undefined,
           photoUrl: photoUrl ?? undefined,
+          googleHours: hours ?? undefined,
           tags: [
             ...place.tags,
             ...(hours?.closesAtMinutesFromNow !== null && (hours?.closesAtMinutesFromNow ?? Infinity) <= 30
@@ -135,6 +136,10 @@ function buildPlaceGroups(scoredPlaces: Place[]): PlaceGroup[] {
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, 4),
   })).filter((group) => group.places.length > 0);
+}
+
+function mergeUniqueTags(tags: string[]): string[] {
+  return [...new Set(tags)];
 }
 
 router.get("/", ipRateLimit, async (req: Request, res: Response) => {
@@ -232,7 +237,13 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     // ── 공원: 카카오(키워드) + Tour API 관광지 + 서울시 공원 + 카카오 관광명소 ──
     const rawParks = deduplicatePlaces([...kakaoParks, ...tourAttractions, ...seoulParks, ...kakaoTouristSpots]);
 
+    const taggedPopularPlaces = popularPlaces.map((place) => ({
+      ...place,
+      tags: mergeUniqueTags([...place.tags, "인기"]),
+    }));
+
     const allPlaces: Place[] = deduplicatePlaces([
+      ...taggedPopularPlaces,
       ...cafes,
       ...restaurants,
       ...shoppingPlaces,
@@ -252,10 +263,13 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       ` 포토${photoBooths.length} 바${bars.length} 자연${naturePlaces.length} 영화관${cinemas.length}`
     );
 
-    // ── Google Places 보강: 가까운 25개만 미리 enrich → 별점이 스코어링에 반영됨 ──
+    // ── Google Places 보강: 가까운 후보 + 인기 후보를 함께 enrich ─────────
     const nearbyFirst = [...allPlaces].sort((a, b) => a.walkingMinutes - b.walkingMinutes).slice(0, 25);
-    const enrichedTop = hasGoogleKey ? await enrichWithGoogleDetails(nearbyFirst) : nearbyFirst;
-    const enrichedById = new Map(enrichedTop.map((p) => [p.id, p]));
+    const googleCandidates = [...new Map(
+      [...nearbyFirst, ...taggedPopularPlaces].map((place) => [place.id, place] as const)
+    ).values()];
+    const enrichedCandidates = hasGoogleKey ? await enrichWithGoogleDetails(googleCandidates) : googleCandidates;
+    const enrichedById = new Map(enrichedCandidates.map((p) => [p.id, p]));
     const enrichedPlaces = allPlaces.map((p) => enrichedById.get(p.id) ?? p);
 
     // ── 스코어 계산 (googleRating/reviewCount 포함) ──────────────
@@ -279,8 +293,10 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     const courses = buildCourses(scoredPlaces, weather, hour, options, forecast);
 
     // ── 인기 코스 생성 (accuracy 정렬 장소 기반) ─────────────────
-    if (popularPlaces.length >= 2) {
-      const scoredPopular = popularPlaces.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
+    const popularIds = new Set(taggedPopularPlaces.map((place) => place.id));
+    const enrichedPopularPlaces = enrichedPlaces.filter((place) => popularIds.has(place.id));
+    if (enrichedPopularPlaces.length >= 2) {
+      const scoredPopular = enrichedPopularPlaces.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
       const popularCourse = buildCourses(scoredPopular, weather, hour, options, forecast);
       const best = popularCourse[0];
       if (best && !courses.some((c) => c.places.every((p, i) => p.id === best.places[i]?.id))) {
