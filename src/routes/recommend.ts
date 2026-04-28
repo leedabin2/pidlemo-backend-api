@@ -96,7 +96,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
   return Promise.all(
     places.map(async (place) => {
       try {
-        const details = await getPlaceDetails(place.name, place.coordinates);
+        const details = await getPlaceDetails(place.name, place.coordinates, place.address);
         if (!details) return place;
 
         const { hours, rating, reviewCount, priceLevel, photoUrl } = details;

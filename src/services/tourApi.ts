@@ -43,6 +43,11 @@ const CONTENT_TYPE = {
   festival: "15",
 } as const;
 
+const EVENT_EXCLUDE_TEXT_KW = [
+  "유흥", "유흥주점", "단란주점", "주점", "라이브주점", "라이브바",
+  "클럽", "라운지", "룸", "룸살롱", "헌팅", "포차", "호프", "이자카야",
+];
+
 interface TourItem {
   contentid: string;
   title: string;
@@ -217,6 +222,11 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
 
     const result = items
       .map((item) => {
+        const searchableText = `${item.title ?? ""} ${item.addr1 ?? ""}`.toLowerCase();
+        if (EVENT_EXCLUDE_TEXT_KW.some((kw) => searchableText.includes(kw.toLowerCase()))) {
+          return null;
+        }
+
         const placeCoords = {
           lat: parseFloat(item.mapy),
           lng: parseFloat(item.mapx),

@@ -35,11 +35,37 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
+const PRIMARY_MATCH_MAX_DISTANCE_METERS = 220;
+const STRIPPED_MATCH_MAX_DISTANCE_METERS = 120;
+
+interface FindPlaceCandidate {
+  place_id: string;
+  name?: string;
+  formatted_address?: string;
+  geometry?: {
+    location?: {
+      lat: number;
+      lng: number;
+    };
+  };
+}
 
 function timeStringToMinutes(time: string): number {
   const h = parseInt(time.slice(0, 2), 10);
   const m = parseInt(time.slice(2, 4), 10);
   return h * 60 + m;
+}
+
+function haversineDistanceMeters(a: Coordinates, b: Coordinates): number {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const aa =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((a.lat * Math.PI) / 180) *
+      Math.cos((b.lat * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
 }
 
 function toWeekMinutes(day: number, time: string): number {
@@ -156,26 +182,122 @@ function stripBranchSuffix(name: string): string {
   return name.replace(/\s*[가-힣A-Za-z0-9]+점$/, "").trim();
 }
 
-async function findPlaceIdByQuery(query: string, coords: Coordinates): Promise<string | null> {
-  const input = encodeURIComponent(query);
-  const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${input}&inputtype=textquery&locationbias=circle:1500@${coords.lat},${coords.lng}&fields=place_id&key=${GOOGLE_KEY}&language=ko`;
-  const res = await fetch(url);
-  const json = await res.json() as { status?: string; candidates?: { place_id: string }[] };
-  console.log(`[googlePlaces] findPlace "${query}" → status:${json.status} candidates:${json.candidates?.length ?? 0}`);
-  return json.candidates?.[0]?.place_id ?? null;
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^가-힣a-z0-9]/g, "");
 }
 
-async function findPlaceId(name: string, coords: Coordinates): Promise<string | null> {
+function namesLookCompatible(expectedName: string, candidateName: string): "primary" | "stripped" | null {
+  const normalizedExpected = normalizeText(expectedName);
+  const normalizedCandidate = normalizeText(candidateName);
+  if (!normalizedExpected || !normalizedCandidate) return null;
+
+  if (
+    normalizedExpected === normalizedCandidate ||
+    normalizedCandidate.includes(normalizedExpected) ||
+    normalizedExpected.includes(normalizedCandidate)
+  ) {
+    return "primary";
+  }
+
+  const strippedExpected = normalizeText(stripBranchSuffix(expectedName));
+  if (
+    strippedExpected &&
+    strippedExpected !== normalizedExpected &&
+    (
+      strippedExpected === normalizedCandidate ||
+      normalizedCandidate.includes(strippedExpected) ||
+      strippedExpected.includes(normalizedCandidate)
+    )
+  ) {
+    return "stripped";
+  }
+
+  return null;
+}
+
+function addressesLookCompatible(expectedAddress?: string, candidateAddress?: string): boolean {
+  if (!expectedAddress || !candidateAddress) return true;
+
+  const expectedTokens = expectedAddress
+    .split(/\s+/)
+    .map((token) => token.replace(/[(),]/g, "").trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 5);
+  const normalizedCandidate = candidateAddress.replace(/\s+/g, " ");
+
+  if (expectedTokens.length === 0) return true;
+  const matched = expectedTokens.filter((token) => normalizedCandidate.includes(token));
+  return matched.length >= Math.min(2, expectedTokens.length);
+}
+
+function isValidCandidate(
+  candidate: FindPlaceCandidate,
+  expectedName: string,
+  coords: Coordinates,
+  expectedAddress?: string
+): boolean {
+  if (!candidate.name || !candidate.geometry?.location) return false;
+
+  const matchType = namesLookCompatible(expectedName, candidate.name);
+  if (!matchType) return false;
+
+  const distanceMeters = haversineDistanceMeters(coords, {
+    lat: candidate.geometry.location.lat,
+    lng: candidate.geometry.location.lng,
+  });
+  const maxDistance =
+    matchType === "primary" ? PRIMARY_MATCH_MAX_DISTANCE_METERS : STRIPPED_MATCH_MAX_DISTANCE_METERS;
+  if (distanceMeters > maxDistance) {
+    console.log(
+      `[googlePlaces] reject candidate "${candidate.name}" distance=${Math.round(distanceMeters)}m expected="${expectedName}"`
+    );
+    return false;
+  }
+
+  if (!addressesLookCompatible(expectedAddress, candidate.formatted_address)) {
+    console.log(
+      `[googlePlaces] reject candidate "${candidate.name}" address mismatch expected="${expectedAddress}" candidate="${candidate.formatted_address}"`
+    );
+    return false;
+  }
+
+  return true;
+}
+
+async function findPlaceIdByQuery(
+  query: string,
+  expectedName: string,
+  coords: Coordinates,
+  expectedAddress?: string
+): Promise<string | null> {
+  const input = encodeURIComponent(query);
+  const fields = ["place_id", "name", "formatted_address", "geometry"].join(",");
+  const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${input}&inputtype=textquery&locationbias=circle:1500@${coords.lat},${coords.lng}&fields=${fields}&key=${GOOGLE_KEY}&language=ko`;
+  const res = await fetch(url);
+  const json = await res.json() as { status?: string; candidates?: FindPlaceCandidate[] };
+  console.log(`[googlePlaces] findPlace "${query}" → status:${json.status} candidates:${json.candidates?.length ?? 0}`);
+
+  const matched = json.candidates?.find((candidate) =>
+    isValidCandidate(candidate, expectedName, coords, expectedAddress)
+  );
+  return matched?.place_id ?? null;
+}
+
+async function findPlaceId(
+  name: string,
+  coords: Coordinates,
+  address?: string
+): Promise<string | null> {
   if (!GOOGLE_KEY) return null;
 
   // 1차: 원래 이름
-  const id = await findPlaceIdByQuery(name, coords);
+  const id = await findPlaceIdByQuery(name, name, coords, address);
   if (id) return id;
 
   // 2차: 지점명 제거 후 재시도
   const stripped = stripBranchSuffix(name);
   if (stripped && stripped !== name) {
-    const id2 = await findPlaceIdByQuery(stripped, coords);
+    const id2 = await findPlaceIdByQuery(stripped, name, coords, address);
     if (id2) {
       console.log(`[googlePlaces] 지점명 제거로 매칭: "${name}" → "${stripped}"`);
       return id2;
@@ -233,18 +355,19 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
 
 export async function getPlaceDetails(
   name: string,
-  coords: Coordinates
+  coords: Coordinates,
+  address?: string
 ): Promise<PlaceDetails | null> {
   if (!GOOGLE_KEY) return null;
 
-  const key = `${name}|${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
+  const key = `${name}|${address ?? ""}|${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
   const cached = cache.get(key);
   if (cached && Date.now() < cached.expiresAt) return detailsFromCache(cached);
 
   try {
-    const placeId = await findPlaceId(name, coords);
+    const placeId = await findPlaceId(name, coords, address);
     if (!placeId) {
-      console.log(`[googlePlaces] place_id 못 찾음: ${name}`);
+      console.log(`[googlePlaces] 검증 가능한 place_id 못 찾음: ${name}`);
       return null;
     }
 
@@ -269,9 +392,10 @@ export async function getPlaceDetails(
 // 하위 호환: 영업시간만 필요한 경우
 export async function getPlaceHours(
   name: string,
-  coords: Coordinates
+  coords: Coordinates,
+  address?: string
 ): Promise<PlaceHours | null> {
-  const details = await getPlaceDetails(name, coords);
+  const details = await getPlaceDetails(name, coords, address);
   return details?.hours ?? null;
 }
 
