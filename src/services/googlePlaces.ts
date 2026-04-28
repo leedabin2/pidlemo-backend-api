@@ -107,6 +107,40 @@ function buildHoursFromPeriods(periods: Period[]): PlaceHours | null {
   };
 }
 
+function formatMinutesToTime(minutes: number): string {
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+export function formatOperatingHoursLabel(hours: PlaceHours): string {
+  const today = new Date().getDay();
+  const windows: string[] = [];
+
+  for (const period of hours.periods) {
+    if (!period.close) return "24시간";
+
+    const openMinutes = timeStringToMinutes(period.open.time);
+    const closeMinutes = timeStringToMinutes(period.close.time);
+    const isOvernight = period.close.day !== period.open.day || closeMinutes <= openMinutes;
+
+    if (period.open.day === today) {
+      windows.push(`${formatMinutesToTime(openMinutes)}-${formatMinutesToTime(closeMinutes)}`);
+      continue;
+    }
+
+    if (isOvernight && period.close.day === today) {
+      windows.push(`00:00-${formatMinutesToTime(closeMinutes)}`);
+    }
+  }
+
+  if (windows.length === 0) {
+    return hours.isOpenNow ? "오늘 운영중" : "오늘 휴무";
+  }
+
+  return windows.join(" / ");
+}
+
 function detailsFromCache(entry: CacheEntry): PlaceDetails {
   return {
     hours: buildHoursFromPeriods(entry.periods),

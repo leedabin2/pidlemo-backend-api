@@ -24,38 +24,85 @@ const CAFE_TAKEOUT_NAME_KW = ["투고", "to go", "togo", "테이크아웃", "tak
 // 카카오 category_name에 이 키워드가 있으면 테이크아웃 전용으로 판단
 const CAFE_TAKEOUT_CATEGORY_KW = ["테이크아웃"];
 
-// 쇼핑 결과에서 제외
+// 감성 소품샵 결과에서 제외
 const SHOPPING_EXCLUDE_CATEGORY_KW = [
   "인터넷쇼핑", "홈쇼핑", "통신판매",
-  "인테리어 공사", "시공", "건자재", "철물",
-  "농기구", "공구",
-  "편의점", "슈퍼마켓", "슈퍼", "마트", "식품",  // 편의점/마트 계열
-  "주유소", "세차", "수선", "세탁",              // 서비스 업종
+  "인테리어 공사", "시공", "건자재", "철물", "가구", "가구판매", "가구,인테리어",
+  "농기구", "공구", "축산", "축산업", "정육", "수산", "청과", "반찬", "식자재",
+  "편의점", "슈퍼마켓", "슈퍼", "마트", "식품", "식품판매",
+  "주유소", "세차", "수선", "세탁", "생활용품", "잡자재",
 ];
 
 // 장소명에 있으면 무조건 제외 (카테고리와 무관하게)
 const SHOPPING_EXCLUDE_NAME_KW = [
   "편의점", "CU", "GS25", "이마트24", "세븐일레븐", "미니스톱",
   "마트", "슈퍼", "푸드마켓", "식품관",
-  "주차장", "주차",
+  "주차장", "주차", "가구", "리빙샵", "축산", "정육", "수산", "청과", "반찬", "식자재",
 ];
 
-// 쇼핑으로 허용할 category_name 키워드
+// 감성 소품샵으로 허용할 category_name 키워드
 const SHOPPING_ALLOW_CATEGORY_KW = [
-  "소품", "편집", "라이프스타일", "패션", "의류", "복합쇼핑몰", "백화점",
-  "아울렛", "잡화", "쇼핑몰", "문구", "완구", "서점",
+  "소품", "편집", "라이프스타일", "디자인문구", "문구", "잡화", "팬시", "공예", "캐릭터",
+];
+
+const SHOPPING_INCLUDE_NAME_KW = [
+  "소품", "편집", "라이프스타일", "문구", "팬시", "리빙", "셀렉트", "오브제",
+];
+
+const POPUP_INCLUDE_NAME_KW = ["팝업", "플리마켓", "야시장", "버스킹", "축제", "페스티벌", "행사", "전시", "마켓"];
+const POPUP_INCLUDE_CATEGORY_KW = ["공연", "전시", "행사", "축제", "문화"];
+const POPUP_EXCLUDE_CATEGORY_KW = [
+  "음식점", "카페", "편의점", "약국", "병원", "주차",
+  "마트", "슈퍼", "식품", "식품판매", "정육", "수산", "청과", "반찬", "주류",
+  "제과", "베이커리", "편의", "생활용품",
+];
+const POPUP_EXCLUDE_NAME_KW = [
+  "식품판매", "정육", "수산", "청과", "반찬", "과일", "수입식품", "식자재",
+  "마트", "슈퍼", "편의점", "베이커리", "정육점", "청과물", "수산시장",
 ];
 
 // 쇼핑 subCategory 분류 (category_name 기준)
 function shoppingSubCategory(categoryName: string): string | undefined {
-  if (categoryName.includes("백화점")) return "백화점";
-  if (categoryName.includes("복합쇼핑몰") || categoryName.includes("쇼핑몰")) return "쇼핑몰";
-  if (categoryName.includes("아울렛")) return "아울렛";
-  if (categoryName.includes("패션") || categoryName.includes("의류")) return "패션";
+  if (categoryName.includes("디자인문구") || categoryName.includes("문구")) return "디자인문구";
   if (categoryName.includes("소품") || categoryName.includes("잡화")) return "소품샵";
   if (categoryName.includes("편집")) return "편집샵";
   if (categoryName.includes("라이프스타일")) return "라이프스타일";
+  if (categoryName.includes("공예")) return "공예소품";
   return parseSubCategory(categoryName);
+}
+
+function isCuratedShoppingCandidate(doc: KakaoDocument): boolean {
+  const categoryName = doc.category_name.toLowerCase();
+  const placeName = doc.place_name.toLowerCase();
+
+  if (SHOPPING_EXCLUDE_NAME_KW.some((kw) => placeName.includes(kw.toLowerCase()))) {
+    return false;
+  }
+  if (SHOPPING_EXCLUDE_CATEGORY_KW.some((kw) => categoryName.includes(kw.toLowerCase()))) {
+    return false;
+  }
+
+  return (
+    SHOPPING_ALLOW_CATEGORY_KW.some((kw) => categoryName.includes(kw.toLowerCase())) ||
+    SHOPPING_INCLUDE_NAME_KW.some((kw) => placeName.includes(kw.toLowerCase()))
+  );
+}
+
+function isPopupCandidate(doc: KakaoDocument): boolean {
+  const categoryName = doc.category_name.toLowerCase();
+  const placeName = doc.place_name.toLowerCase();
+
+  if (POPUP_EXCLUDE_CATEGORY_KW.some((kw) => categoryName.includes(kw.toLowerCase()))) {
+    return false;
+  }
+  if (POPUP_EXCLUDE_NAME_KW.some((kw) => placeName.includes(kw.toLowerCase()))) {
+    return false;
+  }
+
+  return (
+    POPUP_INCLUDE_NAME_KW.some((kw) => placeName.includes(kw.toLowerCase())) ||
+    POPUP_INCLUDE_CATEGORY_KW.some((kw) => categoryName.includes(kw.toLowerCase()))
+  );
 }
 
 interface KakaoDocument {
@@ -178,17 +225,12 @@ export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]
 }
 
 export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Place[]> {
-  // 감성/트렌디 소형 매장: 1.5km, 대형몰: 5km
-  const nearQueries = ["소품샵", "편집샵", "라이프스타일샵", "감성문구", "디자인문구", "감성잡화"];
-  const farQueries = ["복합쇼핑몰", "백화점", "쇼핑몰", "아울렛"];
+  const queries = ["소품샵", "편집샵", "라이프스타일샵", "감성문구", "디자인문구", "리빙소품", "셀렉트숍"];
 
-  const [nearResults, farResults] = await Promise.all([
-    Promise.all(nearQueries.map((q) => searchByKeyword(q, coords, 8, 1500))),
-    Promise.all(farQueries.map((q) => searchByKeyword(q, coords, 6, 5000))),
-  ]);
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, 1800)));
 
   const deduped = new Map<string, KakaoDocument>();
-  for (const docs of [...nearResults, ...farResults]) {
+  for (const docs of results) {
     for (const doc of docs) {
       if (!deduped.has(doc.id)) deduped.set(doc.id, doc);
     }
@@ -198,23 +240,9 @@ export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Plac
   console.log(`[kakao] 쇼핑 후보 ${allDocs.length}개:`, allDocs.map(d => `${d.place_name}(${d.category_name})`).join(", "));
 
   const shoppingDocs = allDocs
-    .filter((doc) => {
-      const cat = doc.category_name.toLowerCase();
-      const name = doc.place_name;
-      // 1) 장소명 블록리스트 먼저 (카테고리 무관하게 제외)
-      if (SHOPPING_EXCLUDE_NAME_KW.some((kw) => name.includes(kw))) return false;
-      // 2) 카테고리 블록리스트
-      if (SHOPPING_EXCLUDE_CATEGORY_KW.some((kw) => cat.includes(kw.toLowerCase()))) return false;
-      // 3) 허용 카테고리
-      if (SHOPPING_ALLOW_CATEGORY_KW.some((kw) => cat.includes(kw.toLowerCase()))) return true;
-      // 4) 장소명으로 판단 (마켓/마트 제외, 소품/편집/라이프/몰/백화점/아울렛만)
-      if (["소품", "편집", "라이프", "몰", "백화점", "아울렛"].some((kw) => name.includes(kw))) return true;
-      // 5) 쇼핑 카테고리 중 오프라인 계열만 (편의점/마트 제외)
-      if (cat.startsWith("쇼핑") && !cat.includes("인터넷") && !cat.includes("홈쇼핑") && !cat.includes("통신") && !cat.includes("편의") && !cat.includes("마트") && !cat.includes("슈퍼")) return true;
-      return false;
-    })
+    .filter(isCuratedShoppingCandidate)
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
-    .slice(0, 8);
+    .slice(0, 6);
 
   console.log(`[kakao] 쇼핑 필터 후 ${shoppingDocs.length}개:`, shoppingDocs.map(d => `${d.place_name}(${d.category_name})`).join(", "));
 
@@ -443,20 +471,22 @@ export async function getNearByCultureVenues(coords: Coordinates): Promise<Place
 // 카카오 accuracy(인기/관련도) 정렬로 인기 장소 수집
 // sort=accuracy → 카카오맵 내 리뷰수·저장수·방문수 기반 정렬
 export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place[]> {
-  // 각 카테고리별 인기순 상위 결과
-  const queries: Array<{ query: string; category: Place["category"] }> = [
-    { query: "카페",     category: "cafe" },
-    { query: "맛집",     category: "restaurant" },
-    { query: "소품샵",   category: "shopping" },
-    { query: "전시",     category: "exhibition" },
-    { query: "팝업",     category: "popup" },
+  const queries: Array<{ query: string; category: Place["category"]; filter?: (doc: KakaoDocument) => boolean }> = [
+    { query: "카페",   category: "cafe" },
+    { query: "맛집",   category: "restaurant",
+      filter: (doc) => !RESTAURANT_EXCLUDE_CATEGORY_KW.some((kw) => doc.category_name.includes(kw)) },
+    { query: "소품샵", category: "shopping",
+      filter: isCuratedShoppingCandidate },
+    { query: "전시",   category: "exhibition" },
+    { query: "팝업",   category: "popup", filter: isPopupCandidate },
   ];
 
   const results = await Promise.all(
-    queries.map(({ query, category }) =>
-      searchByKeyword(query, coords, 5, 3000, "accuracy").then((docs) =>
-        docsToPlaces(docs.slice(0, 3), category)
-      )
+    queries.map(({ query, category, filter }) =>
+      searchByKeyword(query, coords, 8, 3000, "accuracy").then((docs) => {
+        const filtered = filter ? docs.filter(filter) : docs;
+        return docsToPlaces(filtered.slice(0, 3), category);
+      })
     )
   );
 
@@ -476,8 +506,6 @@ export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place
 // 카카오 키워드로 팝업/행사/마켓 검색
 // 공공 API에 없는 소규모 행사도 카카오맵 등록 기준으로 잡힘
 const POPUP_QUERIES = ["팝업스토어", "팝업", "플리마켓", "야시장", "버스킹", "축제", "마켓"];
-// 일반 상점/음식점 카테고리는 팝업이 아님
-const POPUP_EXCLUDE_CATEGORY_KW = ["음식점", "카페", "편의점", "약국", "병원", "주차", "마트"];
 
 export async function getNearByKakaoPopups(coords: Coordinates): Promise<Place[]> {
   const results = await Promise.all(
@@ -491,15 +519,7 @@ export async function getNearByKakaoPopups(coords: Coordinates): Promise<Place[]
   }
 
   const popupDocs = [...deduped.values()]
-    .filter((doc) => {
-      const cat = doc.category_name.toLowerCase();
-      // 일반 상시 운영 업종 제외
-      if (POPUP_EXCLUDE_CATEGORY_KW.some((kw) => cat.includes(kw.toLowerCase()))) return false;
-      // 장소명에 팝업/마켓/행사 키워드가 있어야 함
-      const name = doc.place_name;
-      return POPUP_QUERIES.some((kw) => name.includes(kw)) ||
-        cat.includes("공연") || cat.includes("전시") || cat.includes("행사");
-    })
+    .filter(isPopupCandidate)
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, 6);
 

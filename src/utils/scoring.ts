@@ -1,4 +1,5 @@
 import type { Coordinates, Course, ForecastEntry, Place, WeatherInfo } from "../types";
+import { isOpenAtOffset as isGoogleOpenAtOffset } from "../services/googlePlaces";
 import { getOpenStateAtOffset } from "./openHours";
 
 type WeatherCondition = "실내전용" | "실내선호" | "쾌적" | "야외최적";
@@ -397,28 +398,39 @@ function ratingScore(place: Place): number {
   // 카페/맛집만 별점·리뷰 수 반영
   if (place.category !== "cafe" && place.category !== "restaurant") return 0;
 
-  let score = 0;
   const { googleRating, googleReviewCount } = place;
-
-  if (googleRating !== undefined) {
-    if (googleRating >= 4.5) score += 18;
-    else if (googleRating >= 4.2) score += 12;
-    else if (googleRating >= 4.0) score += 8;
-    else if (googleRating >= 3.5) score += 3;
-    else score -= 5;
+  if (googleRating === undefined || googleReviewCount === undefined || googleReviewCount <= 0) {
+    return 0;
   }
 
-  if (googleReviewCount !== undefined) {
-    if (googleReviewCount >= 1000) score += 8;
-    else if (googleReviewCount >= 500) score += 5;
-    else if (googleReviewCount >= 100) score += 2;
+  // 리뷰 수가 적을수록 전체 평균 쪽으로 당기는 베이지안 보정
+  const priorMean = 4.2;
+  const priorWeight = 50;
+  const weightedRating =
+    (googleReviewCount / (googleReviewCount + priorWeight)) * googleRating +
+    (priorWeight / (googleReviewCount + priorWeight)) * priorMean;
+
+  // 리뷰 수는 별도 보너스가 아니라 신뢰도로 사용
+  const confidence = Math.min(1, Math.log10(googleReviewCount + 1) / 2);
+  const baseScore = Math.max(-6, Math.min(18, (weightedRating - 3.8) * 12));
+  let score = baseScore * confidence;
+
+  if (googleReviewCount >= 500) {
+    score += 4;
+  } else if (googleReviewCount >= 100) {
+    score += 2;
   }
 
-  return score;
+  // 리뷰가 너무 적으면 사실상 참고 수준으로만 반영
+  if (googleReviewCount < 5) {
+    score = Math.min(score, 2);
+  }
+
+  return Math.round(score);
 }
 
 function popularityScore(place: Place): number {
-  if (!place.tags.includes("인기")) return 0;
+  if (!place.tags.includes("카맵 랭킹") && !place.tags.includes("인기")) return 0;
 
   if (place.category === "cafe" || place.category === "restaurant") return 12;
   if (place.category === "shopping" || place.category === "popup" || place.category === "exhibition") {
@@ -469,7 +481,9 @@ function routeCandidateScore(
     ? calcTravelMinutes(lastPlace.coordinates, candidate.coordinates)
     : candidate.walkingMinutes;
   const arrivalOffset = elapsedMinutes + travelMinutes;
-  const openAtArrival = getOpenStateAtOffset(candidate.operatingHours, arrivalOffset);
+  const openAtArrival = candidate.googleHours
+    ? isGoogleOpenAtOffset(candidate.googleHours, arrivalOffset)
+    : getOpenStateAtOffset(candidate.operatingHours, arrivalOffset);
 
   let score = candidate.score ?? 0;
   score -= Math.min(travelMinutes, 35) * 0.9;
@@ -528,7 +542,10 @@ function buildCourseFromTemplate(
         ? calcTravelMinutes(lastPlace.coordinates, candidate.coordinates)
         : candidate.walkingMinutes;
       const arrivalOffset = elapsedMinutes + travelMinutes;
-      return getOpenStateAtOffset(candidate.operatingHours, arrivalOffset) !== false;
+      const openAtArrival = candidate.googleHours
+        ? isGoogleOpenAtOffset(candidate.googleHours, arrivalOffset)
+        : getOpenStateAtOffset(candidate.operatingHours, arrivalOffset);
+      return openAtArrival !== false;
     }) ?? pool[0];
 
     if (!picked) continue;

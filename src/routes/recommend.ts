@@ -21,7 +21,7 @@ import {
   getNearByTouristSpots,
   getNearByCultureVenues,
 } from "../services/kakaoLocal";
-import { getPlaceDetails, isOpenAtOffset } from "../services/googlePlaces";
+import { formatOperatingHoursLabel, getPlaceDetails, isOpenAtOffset } from "../services/googlePlaces";
 import {
   getNearByPopups as getSeoulPopups,
   getMockPopups as getSeoulMockPopups,
@@ -42,6 +42,7 @@ import {
   type RecommendationOptions,
 } from "../utils/scoring";
 import { isSeoul, isKorea, deduplicatePlaces } from "../utils/region";
+import { generateCourseSummaries } from "../services/aiSummary";
 import type { Coordinates, Place, PlaceCategory, PlaceGroup } from "../types";
 
 const router = Router();
@@ -67,6 +68,28 @@ function parseCategories(value: unknown): PlaceCategory[] {
     .filter((item): item is PlaceCategory => validCategories.has(item as PlaceCategory));
 }
 
+function preferPrimaryPlaces(primary: Place[], fallback: Place[], limit: number): Place[] {
+  const primaryDeduped = deduplicatePlaces(primary).slice(0, limit);
+  if (primaryDeduped.length >= limit) return primaryDeduped;
+
+  const seen = new Set(primaryDeduped.map((place) => place.name.slice(0, 5).trim()));
+  const supplemental = fallback.filter((place) => {
+    const key = place.name.slice(0, 5).trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return [...primaryDeduped, ...supplemental].slice(0, limit);
+}
+
+// 오늘 같은 요일에 영업 주기가 2개 이상 있는지 확인 (브레이크타임 장소 감지)
+function hasBreakTime(hours: import("../services/googlePlaces").PlaceHours): boolean {
+  const today = new Date().getDay();
+  const todayOpenCount = hours.periods.filter((p) => p.open.day === today).length;
+  return todayOpenCount >= 2;
+}
+
 async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
   if (!process.env.GOOGLE_PLACES_API_KEY) return places;
 
@@ -78,9 +101,12 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
 
         const { hours, rating, reviewCount, priceLevel, photoUrl } = details;
         const openAtArrival = hours ? isOpenAtOffset(hours, place.walkingMinutes) : null;
+        const closingSoon = hours?.closesAtMinutesFromNow !== null && (hours?.closesAtMinutesFromNow ?? Infinity) <= 30;
+        const breakTime = closingSoon && hours ? hasBreakTime(hours) : false;
 
         return {
           ...place,
+          operatingHours: hours ? formatOperatingHoursLabel(hours) : place.operatingHours,
           isOpen: hours ? hours.isOpenNow : place.isOpen,
           googleRating: rating ?? undefined,
           googleReviewCount: reviewCount ?? undefined,
@@ -89,9 +115,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
           googleHours: hours ?? undefined,
           tags: [
             ...place.tags,
-            ...(hours?.closesAtMinutesFromNow !== null && (hours?.closesAtMinutesFromNow ?? Infinity) <= 30
-              ? ["곧 마감"]
-              : []),
+            ...(breakTime ? ["브레이크타임"] : closingSoon ? ["곧 마감"] : []),
             ...(openAtArrival === false ? ["도착 시 마감"] : []),
           ],
         };
@@ -142,6 +166,31 @@ function mergeUniqueTags(tags: string[]): string[] {
   return [...new Set(tags)];
 }
 
+// ── Layer 1: 장소 풀 캐시 (위치 격자 기반, 2시간) ────────────────
+interface PlacePool {
+  cafes: Place[]; restaurants: Place[]; shoppingPlaces: Place[];
+  kakaoParks: Place[]; photoBooths: Place[]; bars: Place[];
+  naturePlaces: Place[]; cinemas: Place[]; kakaoPopups: Place[];
+  popularPlaces: Place[]; kakaoTouristSpots: Place[]; kakaoCultureVenues: Place[];
+  tourAttractions: Place[]; tourCulture: Place[]; tourFestivals: Place[];
+  seoulPopups: Place[]; seoulParks: Place[];
+}
+const placePoolCache = new Map<string, { pool: PlacePool; expiresAt: number }>();
+const POOL_TTL_MS = 2 * 60 * 60 * 1000; // 2시간
+
+function poolKey(coords: Coordinates, seoul: boolean): string {
+  return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}_${seoul ? "s" : "n"}`;
+}
+
+// ── Layer 2: AI 요약 캐시 (코스 조합 기반, 4시간) ────────────────
+const aiSummaryCache = new Map<string, { summaries: string[]; expiresAt: number }>();
+const AI_TTL_MS = 4 * 60 * 60 * 1000; // 4시간
+
+function aiKey(courses: import("../types").Course[], slot: string, condition: string): string {
+  const ids = courses.map((c) => c.places.map((p) => p.id).join("+")).join("|");
+  return `${ids}__${slot}__${condition}`;
+}
+
 router.get("/", ipRateLimit, async (req: Request, res: Response) => {
   const lat = parseFloat(req.query.lat as string);
   const lng = parseFloat(req.query.lng as string);
@@ -175,71 +224,81 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
   console.log(`[recommend] Kakao:${hasKakaoKey ? "✅" : "❌"} Tour:${hasTourKey ? "✅" : "❌"} Google:${hasGoogleKey ? "✅" : "❌"}`);
 
   try {
-    // ── 병렬 데이터 수집 ────────────────────────────────────────
-    const [
-      weather,
-      forecast,
-      cafes,
-      restaurants,
-      shoppingPlaces,
-      kakaoParks,
-      photoBooths,
-      bars,
-      naturePlaces,
-      cinemas,
-      kakaoPopups,
-      popularPlaces,
-      kakaoTouristSpots,
-      kakaoCultureVenues,
-      tourAttractions,
-      tourCulture,
-      tourFestivals,
-      seoulPopups,
-      seoulParks,
-    ] = await Promise.all([
+    // ── 날씨는 항상 실시간 (30분 내 변경 가능) ──────────────────
+    const [weather, forecast] = await Promise.all([
       getWeather(coords),
       getWeatherForecast(coords),
-
-      // 카페/맛집/쇼핑/공원: 카카오 (전국)
-      hasKakaoKey ? getNearByCafes(coords) : Promise.resolve(getMockCafes(coords)),
-      hasKakaoKey ? getNearByRestaurants(coords) : Promise.resolve([]),
-      hasKakaoKey ? getNearByShoppingPlaces(coords) : Promise.resolve(getMockShoppingPlaces(coords)),
-      hasKakaoKey ? getKakaoParks(coords) : Promise.resolve(getMockKakaoParks(coords)),
-
-      // 신규 카테고리: 카카오 (전국)
-      hasKakaoKey ? getNearByPhotoBooth(coords) : Promise.resolve([]),
-      hasKakaoKey ? getNearByBars(coords) : Promise.resolve([]),
-      hasKakaoKey ? getNearByNaturePlaces(coords) : Promise.resolve([]),
-      hasKakaoKey ? getNearByCinemas(coords) : Promise.resolve([]),
-      // 카카오 키워드 팝업/행사
-      hasKakaoKey ? getNearByKakaoPopups(coords) : Promise.resolve([]),
-      // 인기순(accuracy) 장소 — 인기 코스 전용
-      hasKakaoKey ? getNearByPopularPlaces(coords) : Promise.resolve([]),
-      // 관광명소(AT4) + 문화시설(갤러리/미술관/박물관)
-      hasKakaoKey ? getNearByTouristSpots(coords) : Promise.resolve([]),
-      hasKakaoKey ? getNearByCultureVenues(coords) : Promise.resolve([]),
-
-      // 관광지/문화/행사: Tour API (전국)
-      hasTourKey ? getTourAttractions(coords) : Promise.resolve(getMockAttractions(coords)),
-      hasTourKey ? getTourCulture(coords) : Promise.resolve([]),
-      hasTourKey ? getTourFestivals(coords) : Promise.resolve(getMockFestivals(coords)),
-
-      // 서울 한정
-      seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
-      seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
     ]);
+
+    // ── Layer 1: 장소 풀 캐시 체크 ───────────────────────────────
+    const pKey = poolKey(coords, seoul);
+    const cachedPool = placePoolCache.get(pKey);
+    let pool: PlacePool;
+
+    if (cachedPool && Date.now() < cachedPool.expiresAt) {
+      console.log(`[recommend] 장소 풀 캐시 HIT (${pKey})`);
+      pool = cachedPool.pool;
+    } else {
+      console.log(`[recommend] 장소 풀 캐시 MISS → API 수집`);
+      const [
+        cafes, restaurants, shoppingPlaces, kakaoParks,
+        photoBooths, bars, naturePlaces, cinemas,
+        kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
+        tourAttractions, tourCulture, tourFestivals,
+        seoulPopups, seoulParks,
+      ] = await Promise.all([
+        hasKakaoKey ? getNearByCafes(coords) : Promise.resolve(getMockCafes(coords)),
+        hasKakaoKey ? getNearByRestaurants(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByShoppingPlaces(coords) : Promise.resolve(getMockShoppingPlaces(coords)),
+        hasKakaoKey ? getKakaoParks(coords) : Promise.resolve(getMockKakaoParks(coords)),
+        hasKakaoKey ? getNearByPhotoBooth(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByBars(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByNaturePlaces(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByCinemas(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByKakaoPopups(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByPopularPlaces(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByTouristSpots(coords) : Promise.resolve([]),
+        hasKakaoKey ? getNearByCultureVenues(coords) : Promise.resolve([]),
+        hasTourKey ? getTourAttractions(coords) : Promise.resolve(getMockAttractions(coords)),
+        hasTourKey ? getTourCulture(coords) : Promise.resolve([]),
+        hasTourKey ? getTourFestivals(coords) : Promise.resolve(getMockFestivals(coords)),
+        seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
+        seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
+      ]);
+
+      pool = {
+        cafes, restaurants, shoppingPlaces, kakaoParks,
+        photoBooths, bars, naturePlaces, cinemas,
+        kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
+        tourAttractions, tourCulture, tourFestivals,
+        seoulPopups, seoulParks,
+      };
+      placePoolCache.set(pKey, { pool, expiresAt: Date.now() + POOL_TTL_MS });
+    }
+
+    const {
+      cafes, restaurants, shoppingPlaces, kakaoParks,
+      photoBooths, bars, naturePlaces, cinemas,
+      kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
+      tourAttractions, tourCulture, tourFestivals,
+      seoulPopups, seoulParks,
+    } = pool;
 
     console.log(`[recommend] 날씨: ${weather.description} ${weather.temp}°C (체감 ${weather.feelsLike}°C) → ${getWeatherCondition(weather)}`);
 
-    // ── 팝업/행사 병합: 카카오 키워드 + Tour API + 서울 공공API ──
-    const rawPopups = deduplicatePlaces([...kakaoPopups, ...tourFestivals, ...seoulPopups]);
+    // ── 팝업/행사: 공공/관광 API 우선, 부족할 때만 카카오 보충 ──
+    const primaryPopups = deduplicatePlaces([...seoulPopups, ...tourFestivals]);
+    const rawPopups = preferPrimaryPlaces(primaryPopups, kakaoPopups, 8);
 
     // ── 공원: 카카오(키워드) + Tour API 관광지 + 서울시 공원 + 카카오 관광명소 ──
     const rawParks = deduplicatePlaces([...kakaoParks, ...tourAttractions, ...seoulParks, ...kakaoTouristSpots]);
 
+    // ── 전시/문화: 공공 문화시설 우선, 부족할 때 카카오 문화시설 보충 ──
+    const curatedCulture = preferPrimaryPlaces(tourCulture, kakaoCultureVenues, 8);
+
     const taggedPopularPlaces = popularPlaces.map((place) => ({
       ...place,
-      tags: mergeUniqueTags([...place.tags, "인기"]),
+      tags: mergeUniqueTags(["카맵 랭킹", ...place.tags]),
     }));
 
     const allPlaces: Place[] = deduplicatePlaces([
@@ -249,8 +308,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       ...shoppingPlaces,
       ...rawPopups,
       ...rawParks,
-      ...tourCulture,
-      ...kakaoCultureVenues, // 갤러리·미술관·박물관
+      ...curatedCulture,
       ...photoBooths,
       ...bars,
       ...naturePlaces,
@@ -259,7 +317,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
 
     console.log(
       `[recommend] 수집: 카페${cafes.length} 맛집${restaurants.length} 쇼핑${shoppingPlaces.length}` +
-      ` 팝업${rawPopups.length}(카카오${kakaoPopups.length}) 공원${rawParks.length} 문화${tourCulture.length}` +
+      ` 팝업${rawPopups.length}(공공${primaryPopups.length}/카카오${kakaoPopups.length}) 공원${rawParks.length} 문화${curatedCulture.length}` +
       ` 포토${photoBooths.length} 바${bars.length} 자연${naturePlaces.length} 영화관${cinemas.length}`
     );
 
@@ -304,11 +362,31 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
           ...best,
           id: "course-popular",
           title: "🔥 사람들이 많이 찾는 코스",
-          tags: ["인기", ...best.tags],
+          tags: mergeUniqueTags(["카맵 랭킹", "인기", ...best.tags]),
           isPopular: true,
         });
       }
     }
+
+    // ── Layer 2: AI 요약 캐시 ────────────────────────────────────
+    const condition = getWeatherCondition(weather, options.weatherAware);
+    const slot = hour < 6 ? "dawn" : hour < 11 ? "morning" : hour < 14 ? "lunch" : hour < 17 ? "afternoon" : hour < 21 ? "evening" : "night";
+    const aKey = aiKey(courses, slot, condition);
+    const cachedAi = aiSummaryCache.get(aKey);
+
+    let summaries: string[];
+    if (cachedAi && Date.now() < cachedAi.expiresAt) {
+      console.log(`[recommend] AI 요약 캐시 HIT`);
+      summaries = cachedAi.summaries;
+    } else {
+      summaries = await generateCourseSummaries(courses, weather, hour);
+      aiSummaryCache.set(aKey, { summaries, expiresAt: Date.now() + AI_TTL_MS });
+    }
+
+    const coursesWithSummary = courses.map((c, i) => ({
+      ...c,
+      aiReason: summaries[i] || undefined,
+    }));
 
     const finalPlaces = scoredPlaces;
 
@@ -359,7 +437,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         isSunny: weather.isSunny,
         isRainy: weather.isRainy,
       },
-      courses,
+      courses: coursesWithSummary,
       places: topPlaces,
       placeGroups,
       emptyReason,

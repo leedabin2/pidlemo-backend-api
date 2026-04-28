@@ -53,7 +53,8 @@ export interface Course {
   places: Place[];
   tags: string[];
   weatherHint?: string;
-  isPopular?: boolean; // 인기 코스 배지
+  isPopular?: boolean;
+  aiReason?: string;
 }
 
 export interface RecommendQuery {
