@@ -1,6 +1,8 @@
 import axios from "axios";
 import type { Coordinates, Place } from "../types";
 import { getOpenStateNow } from "../utils/openHours";
+import { haversineDistance, calcWalkingMinutes } from "../utils/geo";
+import { logger } from "../utils/logger";
 
 const API_KEY = process.env.TOUR_API_KEY ?? "";
 const BASE_URL = "https://apis.data.go.kr/B551011/KorService1";
@@ -14,23 +16,6 @@ const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 function cacheKey(coords: Coordinates): string {
   return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}`;
-}
-
-// 두 좌표 사이 직선거리 (미터)
-function haversineDistance(a: Coordinates, b: Coordinates): number {
-  const R = 6371000;
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const aa =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((a.lat * Math.PI) / 180) *
-      Math.cos((b.lat * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
-}
-
-function calcWalkingMinutes(meters: number): number {
-  return Math.round(meters / 80);
 }
 
 // contentTypeId
@@ -91,13 +76,13 @@ async function fetchLocationBased(
 
     const items = data?.response?.body?.items?.item;
     if (!items) {
-      console.warn(`[tourApi] contentType=${contentTypeId} 응답 비어있음`);
+      logger.info("tourApi", "응답 비어있음", { contentTypeId });
       return [];
     }
     return Array.isArray(items) ? items : [items];
   } catch (err: unknown) {
     const status = (err as { response?: { status?: number } })?.response?.status;
-    console.error(`[tourApi] locationBasedList1 contentType=${contentTypeId} 오류 (status:${status ?? "unknown"})`);
+    logger.error("tourApi", "locationBasedList1 오류", { contentTypeId, status: status ?? "unknown" });
     return [];
   }
 }
@@ -161,7 +146,7 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
     attractionCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    console.error("[tourApi] 관광지 조회 오류:", err);
+    logger.error("tourApi", "관광지 조회 오류", { error: err instanceof Error ? err.message : String(err) });
     return [];
   }
 }
@@ -198,7 +183,7 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
     cultureCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    console.error("[tourApi] 문화시설 조회 오류:", err);
+    logger.error("tourApi", "문화시설 조회 오류", { error: err instanceof Error ? err.message : String(err) });
     return [];
   }
 }
@@ -265,7 +250,7 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
     festivalCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    console.error("[tourApi] 행사 조회 오류:", err);
+    logger.error("tourApi", "행사 조회 오류", { error: err instanceof Error ? err.message : String(err) });
     return [];
   }
 }

@@ -1,19 +1,17 @@
 import axios from "axios";
 import type { Coordinates, Place } from "../types";
 import { getOpenStateNow } from "../utils/openHours";
+import { haversineDistance, calcWalkingMinutes } from "../utils/geo";
+import { logger } from "../utils/logger";
 
 const API_KEY = process.env.PUBLIC_DATA_API_KEY ?? "";
 
-// 서울시 문화행사 정보 API (OA-15486)
-// URL 형식: /{인증키}/json/culturalEventInfo/{시작번호}/{종료번호}/
 const SEOUL_CULTURE_URL =
   "http://openAPI.seoul.go.kr:8088/{API_KEY}/json/culturalEventInfo/1/100/";
 
-// 서울시 공원정보 API
 const SEOUL_PARK_URL =
   "http://openAPI.seoul.go.kr:8088/{API_KEY}/json/SearchParkInfoService/1/30/";
 
-// 24시간 캐시
 interface CacheEntry<T> { data: T; expiresAt: number }
 const eventCache = new Map<string, CacheEntry<Place[]>>();
 const parkCache = new Map<string, CacheEntry<Place[]>>();
@@ -21,22 +19,6 @@ const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 function cacheKey(coords: Coordinates): string {
   return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}`;
-}
-
-function haversineDistance(a: Coordinates, b: Coordinates): number {
-  const R = 6371000;
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const aa =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((a.lat * Math.PI) / 180) *
-      Math.cos((b.lat * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
-}
-
-function calcWalkingMinutes(meters: number): number {
-  return Math.round(meters / 80);
 }
 
 function isTodayInRange(startDate: string, endDate: string): boolean {
@@ -102,7 +84,7 @@ export async function getNearByPopups(coords: Coordinates): Promise<Place[]> {
     eventCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    console.error("[publicData] 행사 API 오류:", err);
+    logger.error("publicData", "행사 API 오류", { error: err instanceof Error ? err.message : String(err) });
     return getMockPopups(coords);
   }
 }
@@ -148,7 +130,7 @@ export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
     parkCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    console.error("[publicData] 공원 API 오류:", err);
+    logger.error("publicData", "공원 API 오류", { error: err instanceof Error ? err.message : String(err) });
     return getMockParks(coords);
   }
 }
