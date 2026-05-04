@@ -5,10 +5,11 @@ export interface Coordinates {
 
 export type PlaceCategory =
   | "cafe" | "popup" | "park" | "exhibition" | "restaurant" | "shopping"
-  | "bar"     // 술집/바/이자카야
-  | "photo"   // 포토부스
-  | "nature"  // 자연 (등산·바다·오름·목장·식물원)
-  | "cinema"; // 영화관
+  | "bar"      // 술집/바/이자카야
+  | "photo"    // 포토부스
+  | "nature"   // 자연 (등산·바다·오름·목장·식물원)
+  | "cinema"   // 영화관
+  | "activity"; // 실내 액티비티 (만화카페·보드게임·방탈출·오락실)
 
 export interface Place {
   id: string;
@@ -16,6 +17,7 @@ export interface Place {
   category: PlaceCategory;
   coordinates: Coordinates;
   address: string;
+  phone?: string;
   walkingMinutes: number;
   operatingHours: string;
   isOpen: boolean | null;

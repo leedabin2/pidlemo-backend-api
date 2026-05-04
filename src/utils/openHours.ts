@@ -1,4 +1,14 @@
 const ALL_DAY_KEYWORDS = ["24시간", "상시"];
+const KOREA_TIMEZONE = "Asia/Seoul";
+const WEEKDAY_TO_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
 
 interface TimeWindow {
   open: number;
@@ -15,6 +25,24 @@ function isWithinWindow(nowMinutes: number, window: TimeWindow): boolean {
     return nowMinutes >= window.open && nowMinutes <= window.close;
   }
   return nowMinutes >= window.open || nowMinutes <= window.close;
+}
+
+function getKoreaTimeParts(targetDate: Date): { day: number; minutes: number } {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: KOREA_TIMEZONE,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(targetDate);
+  const weekday = parts.find((part) => part.type === "weekday")?.value ?? "Sun";
+  const hour = parseInt(parts.find((part) => part.type === "hour")?.value ?? "0", 10);
+  const minute = parseInt(parts.find((part) => part.type === "minute")?.value ?? "0", 10);
+  return {
+    day: WEEKDAY_TO_INDEX[weekday] ?? 0,
+    minutes: hour * 60 + minute,
+  };
 }
 
 export function parseOperatingWindows(operatingHours: string): TimeWindow[] | null {
@@ -35,7 +63,7 @@ export function getOpenStateAt(operatingHours: string, targetDate: Date): boolea
   const windows = parseOperatingWindows(operatingHours);
   if (!windows) return null;
 
-  const nowMinutes = targetDate.getHours() * 60 + targetDate.getMinutes();
+  const { minutes: nowMinutes } = getKoreaTimeParts(targetDate);
   return windows.some((window) => isWithinWindow(nowMinutes, window));
 }
 

@@ -97,7 +97,7 @@ export async function getNearByPopups(coords: Coordinates): Promise<Place[]> {
       })
       .filter((p: Place | null): p is Place => p !== null && calcWalkingMinutes(haversineDistance(coords, p.coordinates)) <= 60)
       .sort((a: Place, b: Place) => a.walkingMinutes - b.walkingMinutes)
-      .slice(0, 5);
+      .slice(0, 8);
 
     eventCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
@@ -143,7 +143,7 @@ export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
       })
       .filter((p: Place | null): p is Place => p !== null && p.walkingMinutes <= 30)
       .sort((a: Place, b: Place) => a.walkingMinutes - b.walkingMinutes)
-      .slice(0, 5);
+      .slice(0, 8);
 
     parkCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;

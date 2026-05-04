@@ -4,6 +4,16 @@ const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY ?? "";
 // 정적 데이터는 짧게 캐시하고, 영업 여부는 periods로 매 요청 시각에 다시 계산
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const WEEK_MINUTES = 7 * 24 * 60;
+const KOREA_TIMEZONE = "Asia/Seoul";
+const WEEKDAY_TO_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
 
 interface Period {
   open: { day: number; time: string };
@@ -72,8 +82,28 @@ function toWeekMinutes(day: number, time: string): number {
   return day * 24 * 60 + timeStringToMinutes(time);
 }
 
+function getKoreaTimeParts(date: Date): { day: number; hours: number; minutes: number } {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: KOREA_TIMEZONE,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const weekday = parts.find((part) => part.type === "weekday")?.value ?? "Sun";
+  const hours = parseInt(parts.find((part) => part.type === "hour")?.value ?? "0", 10);
+  const minutes = parseInt(parts.find((part) => part.type === "minute")?.value ?? "0", 10);
+  return {
+    day: WEEKDAY_TO_INDEX[weekday] ?? 0,
+    hours,
+    minutes,
+  };
+}
+
 function getWeekMinutes(date: Date): number {
-  return date.getDay() * 24 * 60 + date.getHours() * 60 + date.getMinutes();
+  const { day, hours, minutes } = getKoreaTimeParts(date);
+  return day * 24 * 60 + hours * 60 + minutes;
 }
 
 function getNormalizedCloseMinutes(period: Period): number | null {
@@ -122,12 +152,12 @@ function calcClosesInMinutesAt(periods: Period[], target: Date): number | null {
   return null;
 }
 
-function buildHoursFromPeriods(periods: Period[]): PlaceHours | null {
+function buildHoursFromPeriods(periods: Period[], openNowOverride?: boolean): PlaceHours | null {
   if (!periods.length) return null;
 
   const now = new Date();
   return {
-    isOpenNow: isOpenAtDate(periods, now),
+    isOpenNow: openNowOverride ?? isOpenAtDate(periods, now),
     closesAtMinutesFromNow: calcClosesInMinutesAt(periods, now),
     periods,
   };
@@ -140,7 +170,7 @@ function formatMinutesToTime(minutes: number): string {
 }
 
 export function formatOperatingHoursLabel(hours: PlaceHours): string {
-  const today = new Date().getDay();
+  const today = getKoreaTimeParts(new Date()).day;
   const windows: string[] = [];
 
   for (const period of hours.periods) {
@@ -215,8 +245,20 @@ function namesLookCompatible(expectedName: string, candidateName: string): "prim
   return null;
 }
 
-function addressesLookCompatible(expectedAddress?: string, candidateAddress?: string): boolean {
+// 구글이 광역시 단위만 반환한 경우 (구/동/로/길/번길 없음) → 주소 검증 불가
+function isBroadAddress(address: string): boolean {
+  return !/[구동로길지번]/.test(address);
+}
+
+function addressesLookCompatible(
+  expectedAddress: string | undefined,
+  candidateAddress: string | undefined,
+  distanceMeters: number
+): boolean {
   if (!expectedAddress || !candidateAddress) return true;
+  if (distanceMeters <= 80) return true;
+  // 구글 주소가 너무 광범위하면 검증 스킵 — 거리(distance)로만 판단
+  if (isBroadAddress(candidateAddress)) return true;
 
   const expectedTokens = expectedAddress
     .split(/\s+/)
@@ -227,7 +269,8 @@ function addressesLookCompatible(expectedAddress?: string, candidateAddress?: st
 
   if (expectedTokens.length === 0) return true;
   const matched = expectedTokens.filter((token) => normalizedCandidate.includes(token));
-  return matched.length >= Math.min(2, expectedTokens.length);
+  const minMatches = distanceMeters <= 180 ? 1 : Math.min(2, expectedTokens.length);
+  return matched.length >= minMatches;
 }
 
 function isValidCandidate(
@@ -254,7 +297,7 @@ function isValidCandidate(
     return false;
   }
 
-  if (!addressesLookCompatible(expectedAddress, candidate.formatted_address)) {
+  if (!addressesLookCompatible(expectedAddress, candidate.formatted_address, distanceMeters)) {
     console.log(
       `[googlePlaces] reject candidate "${candidate.name}" address mismatch expected="${expectedAddress}" candidate="${candidate.formatted_address}"`
     );
@@ -283,10 +326,50 @@ async function findPlaceIdByQuery(
   return matched?.place_id ?? null;
 }
 
+// 카카오 전화번호(032-123-4567) → 국제 형식(+8232123456789) 변환
+function toInternationalPhone(phone: string): string | null {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return null;
+  // 0으로 시작하는 국내 번호 → +82 접두
+  if (digits.startsWith("0")) return `+82${digits.slice(1)}`;
+  return null;
+}
+
+async function findPlaceIdByPhone(
+  phone: string,
+  expectedName: string,
+  coords: Coordinates,
+  expectedAddress?: string
+): Promise<string | null> {
+  const intlPhone = toInternationalPhone(phone);
+  if (!intlPhone) return null;
+
+  const input = encodeURIComponent(intlPhone);
+  const fields = ["place_id", "name", "formatted_address", "geometry"].join(",");
+  const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${input}&inputtype=phonenumber&locationbias=circle:2000@${coords.lat},${coords.lng}&fields=${fields}&key=${GOOGLE_KEY}&language=ko`;
+  const res = await fetch(url);
+  const json = await res.json() as { status?: string; candidates?: FindPlaceCandidate[] };
+  console.log(`[googlePlaces] findPlace by phone "${intlPhone}" → status:${json.status} candidates:${json.candidates?.length ?? 0}`);
+
+  const matched = json.candidates?.find((candidate) => {
+    if (!candidate.name || !candidate.geometry?.location) return false;
+    if (!namesLookCompatible(expectedName, candidate.name)) return false;
+    const distanceMeters = haversineDistanceMeters(coords, {
+      lat: candidate.geometry.location.lat,
+      lng: candidate.geometry.location.lng,
+    });
+    if (distanceMeters > PRIMARY_MATCH_MAX_DISTANCE_METERS) return false;
+    return addressesLookCompatible(expectedAddress, candidate.formatted_address, distanceMeters);
+  });
+  if (matched) console.log(`[googlePlaces] 전화번호로 매칭: "${expectedName}" → "${matched.name}"`);
+  return matched?.place_id ?? null;
+}
+
 async function findPlaceId(
   name: string,
   coords: Coordinates,
-  address?: string
+  address?: string,
+  phone?: string
 ): Promise<string | null> {
   if (!GOOGLE_KEY) return null;
 
@@ -302,6 +385,12 @@ async function findPlaceId(
       console.log(`[googlePlaces] 지점명 제거로 매칭: "${name}" → "${stripped}"`);
       return id2;
     }
+  }
+
+  // 3차: 카카오 전화번호로 검색
+  if (phone) {
+    const id3 = await findPlaceIdByPhone(phone, name, coords, address);
+    if (id3) return id3;
   }
 
   console.log(`[googlePlaces] place_id 못 찾음: ${name}`);
@@ -335,7 +424,7 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
   }
 
   const hours: PlaceHours | null = result.opening_hours
-    ? buildHoursFromPeriods(result.opening_hours.periods)
+    ? buildHoursFromPeriods(result.opening_hours.periods, result.opening_hours.open_now)
     : null;
 
   // 대표 사진 URL 생성 (maxwidth=400)
@@ -356,7 +445,8 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
 export async function getPlaceDetails(
   name: string,
   coords: Coordinates,
-  address?: string
+  address?: string,
+  phone?: string
 ): Promise<PlaceDetails | null> {
   if (!GOOGLE_KEY) return null;
 
@@ -365,7 +455,7 @@ export async function getPlaceDetails(
   if (cached && Date.now() < cached.expiresAt) return detailsFromCache(cached);
 
   try {
-    const placeId = await findPlaceId(name, coords, address);
+    const placeId = await findPlaceId(name, coords, address, phone);
     if (!placeId) {
       console.log(`[googlePlaces] 검증 가능한 place_id 못 찾음: ${name}`);
       return null;

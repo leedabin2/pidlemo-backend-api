@@ -48,6 +48,9 @@ const EVENT_EXCLUDE_TEXT_KW = [
   "클럽", "라운지", "룸", "룸살롱", "헌팅", "포차", "호프", "이자카야",
 ];
 
+// TourAPI 관광지(12) 중 키즈 시설 제외
+const ATTRACTION_EXCLUDE_KW = ["키즈", "어린이", "유아", "놀이방", "키즈카페", "유아카페", "어린이집", "유치원"];
+
 interface TourItem {
   contentid: string;
   title: string;
@@ -69,54 +72,43 @@ async function fetchLocationBased(
 ): Promise<TourItem[]> {
   if (!API_KEY) return [];
 
-  const { data } = await axios.get(`${BASE_URL}/locationBasedList1`, {
-    params: {
-      serviceKey: API_KEY,
-      numOfRows,
-      pageNo: 1,
-      MobileOS: "ETC",
-      MobileApp: "pidlemo",
-      _type: "json",
-      mapX: coords.lng,
-      mapY: coords.lat,
-      radius,
-      contentTypeId,
-      arrange: "E", // E=거리순
-    },
-  });
+  try {
+    const { data } = await axios.get(`${BASE_URL}/locationBasedList1`, {
+      params: {
+        serviceKey: API_KEY,
+        numOfRows,
+        pageNo: 1,
+        MobileOS: "ETC",
+        MobileApp: "pidlemo",
+        _type: "json",
+        mapX: coords.lng,
+        mapY: coords.lat,
+        radius,
+        contentTypeId,
+        arrange: "E",
+      },
+    });
 
-  return data?.response?.body?.items?.item ?? [];
+    const items = data?.response?.body?.items?.item;
+    if (!items) {
+      console.warn(`[tourApi] contentType=${contentTypeId} 응답 비어있음`);
+      return [];
+    }
+    return Array.isArray(items) ? items : [items];
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    console.error(`[tourApi] locationBasedList1 contentType=${contentTypeId} 오류 (status:${status ?? "unknown"})`);
+    return [];
+  }
 }
 
 async function fetchFestivals(
   coords: Coordinates,
   radius = 5000
 ): Promise<TourItem[]> {
-  if (!API_KEY) return [];
-
-  const today = new Date();
-  // eventStartDate: 오늘 이전 시작한 행사도 포함 (진행 중인 행사 커버)
-  const eventStartDate = new Date(today);
-  eventStartDate.setDate(today.getDate() - 180); // 6개월 전 시작 행사까지
-  const dateStr = eventStartDate.toISOString().slice(0, 10).replace(/-/g, "");
-
-  const { data } = await axios.get(`${BASE_URL}/searchFestival1`, {
-    params: {
-      serviceKey: API_KEY,
-      numOfRows: 20,
-      pageNo: 1,
-      MobileOS: "ETC",
-      MobileApp: "pidlemo",
-      _type: "json",
-      eventStartDate: dateStr,
-      arrange: "E",
-      mapX: coords.lng,
-      mapY: coords.lat,
-      radius,
-    },
-  });
-
-  return data?.response?.body?.items?.item ?? [];
+  // searchFestival1은 위치 기반 필터를 지원하지 않아 500 에러 발생
+  // locationBasedList1 (contentTypeId=15)으로 대체
+  return fetchLocationBased(coords, CONTENT_TYPE.festival, radius, 20);
 }
 
 // 행사 마감 태그 생성
@@ -142,8 +134,10 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
   if (cached && Date.now() < cached.expiresAt) return cached.data;
 
   try {
-    const items = await fetchLocationBased(coords, CONTENT_TYPE.tourist, 3000, 10);
-    const result = items.map((item) => {
+    const items = await fetchLocationBased(coords, CONTENT_TYPE.tourist, 3000, 14);
+    const result = items.filter((item) =>
+      !ATTRACTION_EXCLUDE_KW.some((kw) => item.title.includes(kw))
+    ).map((item) => {
       const placeCoords = {
         lat: parseFloat(item.mapy),
         lng: parseFloat(item.mapx),
@@ -179,7 +173,7 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
   if (cached && Date.now() < cached.expiresAt) return cached.data;
 
   try {
-    const items = await fetchLocationBased(coords, CONTENT_TYPE.culture, 3000, 10);
+    const items = await fetchLocationBased(coords, CONTENT_TYPE.culture, 3000, 14);
     const result = items.map((item) => {
       const placeCoords = {
         lat: parseFloat(item.mapy),

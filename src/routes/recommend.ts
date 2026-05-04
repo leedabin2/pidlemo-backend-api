@@ -20,6 +20,7 @@ import {
   getNearByPopularPlaces,
   getNearByTouristSpots,
   getNearByCultureVenues,
+  getNearByActivityPlaces,
 } from "../services/kakaoLocal";
 import { formatOperatingHoursLabel, getPlaceDetails, isOpenAtOffset } from "../services/googlePlaces";
 import {
@@ -57,6 +58,7 @@ const PLACE_CATEGORY_ORDER: PlaceCategory[] = [
   "photo",
   "nature",
   "cinema",
+  "activity",
 ];
 
 function parseCategories(value: unknown): PlaceCategory[] {
@@ -96,7 +98,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
   return Promise.all(
     places.map(async (place) => {
       try {
-        const details = await getPlaceDetails(place.name, place.coordinates, place.address);
+        const details = await getPlaceDetails(place.name, place.coordinates, place.address, place.phone);
         if (!details) return place;
 
         const { hours, rating, reviewCount, priceLevel, photoUrl } = details;
@@ -149,6 +151,21 @@ const CATEGORY_TITLE: Record<PlaceCategory, string> = {
   photo: "포토부스",
   nature: "자연",
   cinema: "영화관",
+  activity: "액티비티",
+};
+const POPULAR_CANDIDATE_TAG = "주변 인기 후보";
+const CATEGORY_CANDIDATE_LIMIT: Record<PlaceCategory, number> = {
+  cafe: 8,
+  restaurant: 8,
+  shopping: 6,
+  popup: 6,
+  exhibition: 6,
+  park: 5,
+  bar: 6,
+  photo: 6,
+  nature: 5,
+  cinema: 4,
+  activity: 6,
 };
 
 function buildPlaceGroups(scoredPlaces: Place[]): PlaceGroup[] {
@@ -158,12 +175,115 @@ function buildPlaceGroups(scoredPlaces: Place[]): PlaceGroup[] {
     places: scoredPlaces
       .filter((place) => place.category === category)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, 4),
+      .slice(0, 6),
   })).filter((group) => group.places.length > 0);
 }
 
 function mergeUniqueTags(tags: string[]): string[] {
   return [...new Set(tags)];
+}
+
+function hasGoogleCandidateSignal(place: Place): boolean {
+  return (
+    place.googleReviewCount !== undefined ||
+    place.googleRating !== undefined ||
+    place.googleHours !== undefined ||
+    place.priceLevel !== undefined ||
+    place.photoUrl !== undefined
+  );
+}
+
+function getWeightedGoogleRating(place: Place): number | null {
+  if (place.googleRating === undefined || place.googleReviewCount === undefined || place.googleReviewCount <= 0) {
+    return null;
+  }
+
+  const priorMean = 4.2;
+  const priorWeight = 50;
+  return (
+    (place.googleReviewCount / (place.googleReviewCount + priorWeight)) * place.googleRating +
+    (priorWeight / (place.googleReviewCount + priorWeight)) * priorMean
+  );
+}
+
+function candidateStageScore(place: Place): number {
+  let score = 0;
+  const reviewCount = place.googleReviewCount ?? 0;
+  const weightedRating = getWeightedGoogleRating(place);
+
+  if (place.category === "cafe" || place.category === "restaurant") {
+    score += Math.min(55, Math.round(Math.log10(reviewCount + 1) * 18));
+    score += weightedRating ? Math.max(0, Math.round((weightedRating - 3.8) * 24)) : 0;
+    if (hasGoogleCandidateSignal(place)) score += 6;
+  } else if (hasGoogleCandidateSignal(place)) {
+    score += 6;
+  }
+
+  if (place.tags.includes(POPULAR_CANDIDATE_TAG) || place.tags.includes("인기")) {
+    score += place.category === "cafe" || place.category === "restaurant" ? 14 : 9;
+  }
+
+  if (place.tags.includes("명소")) score += 6;
+  if (place.tags.includes("도착 시 마감")) score -= 18;
+  if (place.tags.includes("곧 마감") || place.tags.includes("브레이크타임")) score -= 8;
+
+  if (place.isOpen === true) score += 8;
+  if (place.isOpen === false) score -= 30;
+  if (place.isOpen === null) score -= 4;
+
+  if (place.walkingMinutes <= 10) score += 6;
+  else if (place.walkingMinutes <= 20) score += 4;
+  else if (place.walkingMinutes <= 30) score += 2;
+
+  return score;
+}
+
+function selectCandidatePlaces(places: Place[]): Place[] {
+  const result: Place[] = [];
+
+  for (const category of PLACE_CATEGORY_ORDER) {
+    const categoryPlaces = places.filter((place) => place.category === category);
+    const limit = CATEGORY_CANDIDATE_LIMIT[category];
+    const sorter = (a: Place, b: Place) => {
+      const scoreDiff = candidateStageScore(b) - candidateStageScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return a.walkingMinutes - b.walkingMinutes;
+    };
+
+    const matched = categoryPlaces.filter(hasGoogleCandidateSignal).sort(sorter);
+    const unmatched = categoryPlaces.filter((place) => !hasGoogleCandidateSignal(place)).sort(sorter);
+
+    const selected = [...matched.slice(0, limit)];
+    if (selected.length < limit) {
+      selected.push(...unmatched.slice(0, limit - selected.length));
+    }
+
+    if (category === "restaurant") {
+      const debugPool = [...matched, ...unmatched]
+        .sort(sorter)
+        .slice(0, 15);
+      const formatCandidate = (place: Place, index: number) => {
+          const weightedRating = getWeightedGoogleRating(place);
+          return `${index + 1}.${place.name}(점수 ${candidateStageScore(place)} / 리뷰 ${place.googleReviewCount ?? "-"} / 보정 ${weightedRating ? weightedRating.toFixed(2) : "-"} / 영업 ${place.isOpen === true ? "Y" : place.isOpen === false ? "N" : "?"} / 인기 ${place.tags.includes(POPULAR_CANDIDATE_TAG) ? "Y" : "N"} / 구글 ${hasGoogleCandidateSignal(place) ? "Y" : "N"})`;
+        };
+
+      const selectedLog = debugPool
+        .filter((place) => selected.some((item) => item.id === place.id))
+        .map(formatCandidate);
+      const cutLog = debugPool
+        .filter((place) => !selected.some((item) => item.id === place.id))
+        .map(formatCandidate);
+
+      console.log(`[recommend][맛집 후보] SELECTED ${selectedLog.join(" | ")}`);
+      if (cutLog.length > 0) {
+        console.log(`[recommend][맛집 후보] CUT ${cutLog.join(" | ")}`);
+      }
+    }
+
+    result.push(...selected);
+  }
+
+  return result;
 }
 
 // ── Layer 1: 장소 풀 캐시 (위치 격자 기반, 2시간) ────────────────
@@ -174,6 +294,7 @@ interface PlacePool {
   popularPlaces: Place[]; kakaoTouristSpots: Place[]; kakaoCultureVenues: Place[];
   tourAttractions: Place[]; tourCulture: Place[]; tourFestivals: Place[];
   seoulPopups: Place[]; seoulParks: Place[];
+  activityPlaces: Place[];
 }
 const placePoolCache = new Map<string, { pool: PlacePool; expiresAt: number }>();
 const POOL_TTL_MS = 2 * 60 * 60 * 1000; // 2시간
@@ -245,7 +366,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         photoBooths, bars, naturePlaces, cinemas,
         kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
         tourAttractions, tourCulture, tourFestivals,
-        seoulPopups, seoulParks,
+        seoulPopups, seoulParks, activityPlaces,
       ] = await Promise.all([
         hasKakaoKey ? getNearByCafes(coords) : Promise.resolve(getMockCafes(coords)),
         hasKakaoKey ? getNearByRestaurants(coords) : Promise.resolve([]),
@@ -264,6 +385,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         hasTourKey ? getTourFestivals(coords) : Promise.resolve(getMockFestivals(coords)),
         seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
         seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
+        hasKakaoKey ? getNearByActivityPlaces(coords) : Promise.resolve([]),
       ]);
 
       pool = {
@@ -271,7 +393,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         photoBooths, bars, naturePlaces, cinemas,
         kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
         tourAttractions, tourCulture, tourFestivals,
-        seoulPopups, seoulParks,
+        seoulPopups, seoulParks, activityPlaces,
       };
       placePoolCache.set(pKey, { pool, expiresAt: Date.now() + POOL_TTL_MS });
     }
@@ -281,24 +403,24 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       photoBooths, bars, naturePlaces, cinemas,
       kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
       tourAttractions, tourCulture, tourFestivals,
-      seoulPopups, seoulParks,
+      seoulPopups, seoulParks, activityPlaces,
     } = pool;
 
     console.log(`[recommend] 날씨: ${weather.description} ${weather.temp}°C (체감 ${weather.feelsLike}°C) → ${getWeatherCondition(weather)}`);
 
     // ── 팝업/행사: 공공/관광 API 우선, 부족할 때만 카카오 보충 ──
     const primaryPopups = deduplicatePlaces([...seoulPopups, ...tourFestivals]);
-    const rawPopups = preferPrimaryPlaces(primaryPopups, kakaoPopups, 8);
+    const rawPopups = preferPrimaryPlaces(primaryPopups, kakaoPopups, 10);
 
     // ── 공원: 카카오(키워드) + Tour API 관광지 + 서울시 공원 + 카카오 관광명소 ──
     const rawParks = deduplicatePlaces([...kakaoParks, ...tourAttractions, ...seoulParks, ...kakaoTouristSpots]);
 
     // ── 전시/문화: 공공 문화시설 우선, 부족할 때 카카오 문화시설 보충 ──
-    const curatedCulture = preferPrimaryPlaces(tourCulture, kakaoCultureVenues, 8);
+    const curatedCulture = preferPrimaryPlaces(tourCulture, kakaoCultureVenues, 10);
 
     const taggedPopularPlaces = popularPlaces.map((place) => ({
       ...place,
-      tags: mergeUniqueTags(["카맵 랭킹", ...place.tags]),
+      tags: mergeUniqueTags([POPULAR_CANDIDATE_TAG, ...place.tags]),
     }));
 
     const allPlaces: Place[] = deduplicatePlaces([
@@ -313,22 +435,42 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       ...bars,
       ...naturePlaces,
       ...cinemas,
+      ...activityPlaces,
     ]);
 
     console.log(
       `[recommend] 수집: 카페${cafes.length} 맛집${restaurants.length} 쇼핑${shoppingPlaces.length}` +
       ` 팝업${rawPopups.length}(공공${primaryPopups.length}/카카오${kakaoPopups.length}) 공원${rawParks.length} 문화${curatedCulture.length}` +
-      ` 포토${photoBooths.length} 바${bars.length} 자연${naturePlaces.length} 영화관${cinemas.length}`
+      ` 포토${photoBooths.length} 바${bars.length} 자연${naturePlaces.length} 영화관${cinemas.length} 액티비티${activityPlaces.length}`
     );
 
     // ── Google Places 보강: 가까운 후보 + 인기 후보를 함께 enrich ─────────
-    const nearbyFirst = [...allPlaces].sort((a, b) => a.walkingMinutes - b.walkingMinutes).slice(0, 25);
+    const nearbyFirst = [...allPlaces].sort((a, b) => a.walkingMinutes - b.walkingMinutes).slice(0, 40);
     const googleCandidates = [...new Map(
       [...nearbyFirst, ...taggedPopularPlaces].map((place) => [place.id, place] as const)
     ).values()];
     const enrichedCandidates = hasGoogleKey ? await enrichWithGoogleDetails(googleCandidates) : googleCandidates;
     const enrichedById = new Map(enrichedCandidates.map((p) => [p.id, p]));
     const enrichedPlaces = allPlaces.map((p) => enrichedById.get(p.id) ?? p);
+
+    const restaurantSourcePool = enrichedPlaces
+      .filter((place) => place.category === "restaurant")
+      .sort((a, b) => {
+        const popularDiff = Number(b.tags.includes(POPULAR_CANDIDATE_TAG)) - Number(a.tags.includes(POPULAR_CANDIDATE_TAG));
+        if (popularDiff !== 0) return popularDiff;
+        return a.walkingMinutes - b.walkingMinutes;
+      })
+      .slice(0, 15)
+      .map((place) => `${place.name}${place.tags.includes(POPULAR_CANDIDATE_TAG) ? "(인기후보)" : ""}`);
+    console.log(`[recommend][맛집 원천 후보 ${restaurantSourcePool.length}개] ${restaurantSourcePool.join(", ")}`);
+
+    // ── 후보 선정: 카테고리별로 구글 매칭 성공 후보 우선 선별 ─────────
+    const candidatePlaces = selectCandidatePlaces(enrichedPlaces);
+    console.log(
+      `[recommend] 후보 선정: ${PLACE_CATEGORY_ORDER.map((category) => (
+        `${category}${candidatePlaces.filter((place) => place.category === category).length}`
+      )).join(" ")}`
+    );
 
     // ── 스코어 계산 (googleRating/reviewCount 포함) ──────────────
     const ctx = {
@@ -342,7 +484,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         weatherAware: options.weatherAware ?? true,
       },
     };
-    const scoredPlaces = enrichedPlaces.map((p) => ({
+    const scoredPlaces = candidatePlaces.map((p) => ({
       ...p,
       score: scorePlace(p, ctx),
     }));
@@ -352,7 +494,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
 
     // ── 인기 코스 생성 (accuracy 정렬 장소 기반) ─────────────────
     const popularIds = new Set(taggedPopularPlaces.map((place) => place.id));
-    const enrichedPopularPlaces = enrichedPlaces.filter((place) => popularIds.has(place.id));
+    const enrichedPopularPlaces = candidatePlaces.filter((place) => popularIds.has(place.id));
     if (enrichedPopularPlaces.length >= 2) {
       const scoredPopular = enrichedPopularPlaces.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
       const popularCourse = buildCourses(scoredPopular, weather, hour, options, forecast);
@@ -362,7 +504,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
           ...best,
           id: "course-popular",
           title: "🔥 사람들이 많이 찾는 코스",
-          tags: mergeUniqueTags(["카맵 랭킹", "인기", ...best.tags]),
+          tags: mergeUniqueTags([POPULAR_CANDIDATE_TAG, "인기", ...best.tags]),
           isPopular: true,
         });
       }
@@ -392,7 +534,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
 
     const topPlaces = [...finalPlaces]
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, 12);
+      .slice(0, 18);
     const placeGroups = buildPlaceGroups(finalPlaces);
 
     // ── 종일 비 감지 → 찜질방/웰니스 코스 추가 ──────────────────
