@@ -46,6 +46,15 @@ const SHOPPING_ALLOW_CATEGORY_KW = [
   "소품", "편집", "라이프스타일", "디자인문구", "잡화", "팬시", "공예",
 ];
 
+const MALL_EXCLUDE_CATEGORY_KW = [
+  "인터넷쇼핑", "홈쇼핑", "통신판매", "대형마트", "마트", "식품", "식품판매",
+  "가구", "가구판매", "축산", "정육", "수산", "청과", "반찬", "도매",
+];
+
+const MALL_ALLOW_CATEGORY_KW = [
+  "복합쇼핑몰", "쇼핑몰", "백화점", "아울렛",
+];
+
 const POPUP_INCLUDE_CATEGORY_KW = ["공연", "전시", "행사", "축제", "문화", "아트", "이벤트홀", "컨벤션"];
 const POPUP_EXCLUDE_CATEGORY_KW = [
   "음식점", "카페", "편의점", "약국", "병원", "주차",
@@ -110,8 +119,20 @@ function shoppingSubCategory(categoryName: string): string | undefined {
   return parseSubCategory(categoryName);
 }
 
+function mallSubCategory(categoryName: string): string | undefined {
+  if (categoryName.includes("복합쇼핑몰")) return "복합쇼핑몰";
+  if (categoryName.includes("백화점")) return "백화점";
+  if (categoryName.includes("아울렛")) return "아울렛";
+  if (categoryName.includes("쇼핑몰")) return "쇼핑몰";
+  return parseSubCategory(categoryName);
+}
+
 function isCuratedShoppingCandidate(doc: KakaoDocument): boolean {
   return matchesCategoryAllowlist(doc.category_name, SHOPPING_ALLOW_CATEGORY_KW, SHOPPING_EXCLUDE_CATEGORY_KW);
+}
+
+function isMallCandidate(doc: KakaoDocument): boolean {
+  return matchesCategoryAllowlist(doc.category_name, MALL_ALLOW_CATEGORY_KW, MALL_EXCLUDE_CATEGORY_KW);
 }
 
 function isCafeCandidate(doc: KakaoDocument): boolean {
@@ -337,6 +358,36 @@ export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Plac
   }));
 }
 
+export async function getNearByMallPlaces(coords: Coordinates): Promise<Place[]> {
+  const queries = ["복합쇼핑몰", "쇼핑몰", "백화점", "아울렛"];
+
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 10, 4000)));
+
+  const deduped = new Map<string, KakaoDocument>();
+  for (const docs of results) {
+    for (const doc of docs) {
+      if (!deduped.has(doc.id)) deduped.set(doc.id, doc);
+    }
+  }
+
+  const allDocs = [...deduped.values()];
+  logger.list("kakao", `쇼핑몰 후보 ${allDocs.length}개`, allDocs.map((d) => `${d.place_name}(${d.category_name})`), 12);
+
+  const mallDocs = allDocs
+    .filter(isMallCandidate)
+    .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
+    .slice(0, DEFAULT_CATEGORY_LIMIT);
+
+  logger.list("kakao", `쇼핑몰 필터 후 ${mallDocs.length}개`, mallDocs.map((d) => `${d.place_name}(${d.category_name})`), 12);
+
+  const places = await docsToPlaces(mallDocs, "mall");
+  return places.map((p, i) => ({
+    ...p,
+    subCategory: mallSubCategory(mallDocs[i]?.category_name ?? ""),
+    tags: ["실내", ...p.tags],
+  }));
+}
+
 export async function getNearByPhotoBooth(coords: Coordinates): Promise<Place[]> {
   const queries = ["인생네컷", "포토이즘", "하루필름", "포토부스", "셀프사진관"];
   const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, 2000)));
@@ -555,6 +606,8 @@ export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place
       filter: (doc) => !RESTAURANT_EXCLUDE_CATEGORY_KW.some((kw) => doc.category_name.includes(kw)) },
     { query: "소품샵", category: "shopping",
       filter: isCuratedShoppingCandidate },
+    { query: "쇼핑몰", category: "mall",
+      filter: isMallCandidate },
     { query: "전시",   category: "exhibition", filter: isCultureVenueCandidate },
     { query: "팝업",   category: "popup", filter: isPopupCandidate },
   ];
@@ -745,6 +798,37 @@ export function getMockShoppingPlaces(coords: Coordinates): Place[] {
       subCategory: "편집샵",
       kakaoMapUrl: "https://place.map.kakao.com/936558791",
       tags: ["소품샵"],
+      source: "kakao",
+    },
+  ];
+}
+
+export function getMockMallPlaces(coords: Coordinates): Place[] {
+  return [
+    {
+      id: "mock-mall-1",
+      name: "코엑스몰",
+      category: "mall",
+      coordinates: { lat: coords.lat + 0.006, lng: coords.lng + 0.001 },
+      address: "서울 강남구 영동대로 513",
+      walkingMinutes: 14,
+      operatingHours: "10:30-22:00",
+      isOpen: getOpenStateNow("10:30-22:00"),
+      subCategory: "복합쇼핑몰",
+      tags: ["실내"],
+      source: "kakao",
+    },
+    {
+      id: "mock-mall-2",
+      name: "롯데월드몰",
+      category: "mall",
+      coordinates: { lat: coords.lat + 0.008, lng: coords.lng - 0.003 },
+      address: "서울 송파구 올림픽로 300",
+      walkingMinutes: 18,
+      operatingHours: "10:30-22:00",
+      isOpen: getOpenStateNow("10:30-22:00"),
+      subCategory: "복합쇼핑몰",
+      tags: ["실내"],
       source: "kakao",
     },
   ];

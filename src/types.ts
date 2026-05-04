@@ -4,7 +4,7 @@ export interface Coordinates {
 }
 
 export type PlaceCategory =
-  | "cafe" | "popup" | "park" | "exhibition" | "restaurant" | "shopping"
+  | "cafe" | "popup" | "park" | "exhibition" | "restaurant" | "shopping" | "mall"
   | "bar"      // 술집/바/이자카야
   | "photo"    // 포토부스
   | "nature"   // 자연 (등산·바다·오름·목장·식물원)

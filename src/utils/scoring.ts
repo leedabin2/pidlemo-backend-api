@@ -46,6 +46,7 @@ const STAY_TIME: Record<Place["category"], number> = {
   park: 50,
   restaurant: 65,
   shopping: 40,
+  mall: 85,
   bar: 90,
   photo: 30,
   nature: 120,
@@ -60,6 +61,7 @@ const CATEGORY_LABEL: Record<Place["category"], string> = {
   park: "공원 산책",
   restaurant: "맛집",
   shopping: "소품샵",
+  mall: "쇼핑몰",
   bar: "바/이자카야",
   photo: "포토부스",
   nature: "자연",
@@ -69,12 +71,12 @@ const CATEGORY_LABEL: Record<Place["category"], string> = {
 
 // 9~22시(morning/lunch/afternoon/evening)에 행사/팝업/전시 우선
 const CATEGORY_ORDER_BY_SLOT: Record<TimeSlot, Place["category"][]> = {
-  dawn:      ["park", "cafe", "exhibition", "shopping", "popup", "restaurant", "nature", "photo", "bar", "cinema", "activity"],
-  morning:   ["popup", "exhibition", "cafe", "park", "shopping", "restaurant", "photo", "nature", "cinema", "bar", "activity"],
-  lunch:     ["restaurant", "popup", "exhibition", "cafe", "shopping", "park", "photo", "cinema", "nature", "bar", "activity"],
-  afternoon: ["popup", "exhibition", "shopping", "cafe", "park", "restaurant", "photo", "cinema", "activity", "nature", "bar"],
-  evening:   ["restaurant", "activity", "popup", "exhibition", "bar", "shopping", "cafe", "park", "photo", "cinema", "nature"],
-  night:     ["activity", "bar", "restaurant", "cafe", "cinema", "shopping", "popup", "exhibition", "photo", "nature", "park"],
+  dawn:      ["park", "cafe", "exhibition", "shopping", "mall", "popup", "restaurant", "nature", "photo", "bar", "cinema", "activity"],
+  morning:   ["popup", "exhibition", "cafe", "park", "shopping", "mall", "restaurant", "photo", "nature", "cinema", "bar", "activity"],
+  lunch:     ["restaurant", "popup", "exhibition", "cafe", "shopping", "mall", "park", "photo", "cinema", "nature", "bar", "activity"],
+  afternoon: ["popup", "exhibition", "shopping", "mall", "cafe", "park", "restaurant", "photo", "cinema", "activity", "nature", "bar"],
+  evening:   ["restaurant", "activity", "popup", "exhibition", "bar", "mall", "shopping", "cafe", "park", "photo", "cinema", "nature"],
+  night:     ["activity", "bar", "restaurant", "cafe", "cinema", "mall", "shopping", "popup", "exhibition", "photo", "nature", "park"],
 };
 
 const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
@@ -87,6 +89,7 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["cafe", "exhibition", "popup"], title: "느긋한 문화 코스 추천!", intent: "culture" },
     { categories: ["cafe", "nature", "restaurant"], title: "명소 둘러보는 오전 코스 추천!", intent: "landmark" },
     { categories: ["shopping", "cafe", "park"], title: "가볍게 둘러보는 오전 코스 추천!", intent: "browse" },
+    { categories: ["mall", "cafe", "restaurant"], title: "실내에서 편하게 보내는 오전 코스 추천!", intent: "mall" },
     { categories: ["cafe", "photo", "shopping"], title: "감성 오전 코스 추천!", intent: "photo" },
     { categories: ["exhibition", "cafe", "park"], title: "조용한 오전 코스 추천!", intent: "quiet" },
     { categories: ["cafe", "popup"], title: "가볍게 시작하는 코스 추천!", intent: "short" },
@@ -97,12 +100,14 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["restaurant", "exhibition", "park"], title: "놀거리 많은 점심 코스 추천!", intent: "play" },
     { categories: ["restaurant", "park", "cafe"], title: "식사 후 산책 코스 추천!", intent: "walk" },
     { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!", intent: "shopping" },
+    { categories: ["mall", "restaurant", "cafe"], title: "쇼핑몰에서 편하게 보내는 코스 추천!", intent: "mall" },
     { categories: ["restaurant", "photo", "cafe"], title: "맛집 후 감성 코스 추천!", intent: "photo" },
     { categories: ["activity", "restaurant", "popup"], title: "실내 놀거리 코스 추천!", intent: "activity" },
     { categories: ["restaurant", "cafe"], title: "짧고 깔끔한 점심 코스 추천!", intent: "short" },
   ],
   afternoon: [
     { categories: ["shopping", "cafe", "park"], title: "소품샵 구경 코스 추천!", intent: "shopping" },
+    { categories: ["mall", "restaurant", "cafe"], title: "쇼핑몰 중심 오후 코스 추천!", intent: "mall" },
     { categories: ["cafe", "popup", "park"], title: "가볍게 돌아다니는 코스 추천!", intent: "browse" },
     { categories: ["cafe", "exhibition", "nature"], title: "구경거리 많은 오후 코스 추천!", intent: "landmark" },
     { categories: ["activity", "exhibition", "popup"], title: "놀거리 많은 코스 추천!", intent: "activity" },
@@ -119,6 +124,7 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["restaurant", "exhibition", "park"], title: "저녁 명소 코스 추천!", intent: "landmark" },
     { categories: ["restaurant", "park", "cafe"], title: "퇴근 후 힐링 코스 추천!", intent: "healing" },
     { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!", intent: "shopping" },
+    { categories: ["mall", "restaurant", "cafe"], title: "실내에서 편하게 보내는 저녁 코스 추천!", intent: "mall" },
     { categories: ["restaurant", "activity", "popup"], title: "놀거리 많은 저녁 코스 추천!", intent: "play" },
     { categories: ["restaurant", "cinema"], title: "영화관 데이트 코스 추천!", intent: "cinema" },
     { categories: ["restaurant", "exhibition", "cafe"], title: "저녁 문화 코스 추천!", intent: "culture" },
@@ -133,11 +139,12 @@ const BASE_TEMPLATES: Record<TimeSlot, CourseTemplate[]> = {
     { categories: ["restaurant", "cafe"], title: "늦은 시간 편한 코스 추천!", intent: "short" },
     { categories: ["cinema", "restaurant"], title: "심야 영화 코스 추천!", intent: "cinema" },
     { categories: ["shopping", "cafe"], title: "늦게까지 구경하는 코스 추천!", intent: "shopping" },
+    { categories: ["mall", "restaurant"], title: "쇼핑몰 중심 야간 코스 추천!", intent: "mall" },
     { categories: ["restaurant", "exhibition"], title: "야간 실내 코스 추천!", intent: "culture" },
   ],
 };
 
-const PARK_FALLBACKS: Place["category"][] = ["exhibition", "popup", "shopping", "cafe", "cinema", "photo"];
+const PARK_FALLBACKS: Place["category"][] = ["mall", "exhibition", "popup", "shopping", "cafe", "cinema", "photo"];
 
 function normalizeOptions(options?: RecommendationOptions): NormalizedOptions {
   const durationBudgetMinutes = (() => {
@@ -250,25 +257,27 @@ function buildCompanionTemplates(
       switch (slot) {
         case "morning":
           return indoorSafe
-            ? [{ categories: ["activity", "cafe", "cinema"], title: "아이와 함께 실내 코스 추천!", intent: "kids-indoor" }]
-            : [{ categories: ["park", "cafe", "activity"], title: "아이와 함께 가볍게 노는 코스 추천!", intent: "kids-play" }];
+            ? [{ categories: ["mall", "activity", "restaurant"], title: "아이와 함께 쇼핑몰 실내 코스 추천!", intent: "kids-mall" }]
+            : [{ categories: ["park", "activity", "cafe"], title: "아이와 함께 가볍게 노는 코스 추천!", intent: "kids-play" }];
         case "lunch":
           return indoorSafe
-            ? [{ categories: ["restaurant", "activity", "cafe"], title: "아이와 함께 실내 점심 코스 추천!", intent: "kids-lunch" }]
+            ? [{ categories: ["mall", "activity", "restaurant"], title: "아이와 함께 쇼핑몰 점심 코스 추천!", intent: "kids-mall" }]
             : [{ categories: ["restaurant", "park", "cafe"], title: "아이와 함께 점심 산책 코스 추천!", intent: "kids-lunch" }];
         case "afternoon":
           return indoorSafe
             ? [
-                { categories: ["activity", "cinema", "cafe"], title: "아이와 함께 실내 놀거리 코스 추천!", intent: "kids-play" },
-                { categories: ["exhibition", "cafe", "shopping"], title: "아이와 함께 둘러보는 코스 추천!", intent: "kids-browse" },
+                { categories: ["mall", "activity", "restaurant"], title: "아이와 함께 쇼핑몰 키즈존 코스 추천!", intent: "kids-mall" },
+                { categories: ["activity", "restaurant", "cafe"], title: "아이와 함께 실내 놀거리 코스 추천!", intent: "kids-play" },
+                { categories: ["cinema", "restaurant", "cafe"], title: "아이와 함께 영화 코스 추천!", intent: "kids-cinema" },
               ]
             : [
-                { categories: ["park", "activity", "cafe"], title: "아이와 함께 놀거리 코스 추천!", intent: "kids-play" },
-                { categories: ["nature", "cafe", "restaurant"], title: "아이와 함께 바깥 나들이 코스 추천!", intent: "kids-outdoor" },
+                { categories: ["park", "restaurant", "cafe"], title: "아이와 함께 공원 나들이 코스 추천!", intent: "kids-picnic" },
+                { categories: ["nature", "restaurant", "cafe"], title: "아이와 함께 바깥 나들이 코스 추천!", intent: "kids-outdoor" },
+                { categories: ["activity", "restaurant", "cafe"], title: "아이와 함께 체험 코스 추천!", intent: "kids-play" },
               ];
         case "evening":
           return indoorSafe
-            ? [{ categories: ["restaurant", "cinema", "cafe"], title: "아이와 함께 저녁 실내 코스 추천!", intent: "kids-evening" }]
+            ? [{ categories: ["mall", "restaurant", "cafe"], title: "아이와 함께 저녁 쇼핑몰 코스 추천!", intent: "kids-evening" }]
             : [{ categories: ["restaurant", "park", "cafe"], title: "아이와 함께 저녁 나들이 코스 추천!", intent: "kids-evening" }];
         case "night":
           return [{ categories: ["restaurant", "cinema"], title: "아이와 함께 편한 야간 코스 추천!", intent: "kids-night" }];
@@ -333,10 +342,14 @@ function buildCompanionTemplates(
         case "lunch":
           return [{ categories: ["restaurant", "cafe"], title: "직장모임 점심 코스 추천!", intent: "coworkers-lunch" }];
         case "afternoon":
-          return [{ categories: ["cafe", "restaurant"], title: "가볍게 만나는 직장모임 코스 추천!", intent: "coworkers-light" }];
+          return [
+            { categories: ["activity", "restaurant", "bar"], title: "팀워크형 직장모임 코스 추천!", intent: "coworkers-team" },
+            { categories: ["restaurant", "cafe"], title: "가볍게 만나는 직장모임 코스 추천!", intent: "coworkers-light" },
+          ];
         case "evening":
           return [
-            { categories: ["restaurant", "bar", "cafe"], title: "직장모임 저녁 코스 추천!", intent: "coworkers-evening" },
+            { categories: ["restaurant", "cafe", "bar"], title: "직장모임 저녁 코스 추천!", intent: "coworkers-evening" },
+            { categories: ["activity", "restaurant", "bar"], title: "액티비티 직장모임 코스 추천!", intent: "coworkers-team" },
             { categories: ["restaurant", "cafe"], title: "편하게 끝나는 직장모임 코스 추천!", intent: "coworkers-short" },
           ];
         case "night":
@@ -349,21 +362,31 @@ function buildCompanionTemplates(
       switch (slot) {
         case "morning":
           return indoorSafe
-            ? [{ categories: ["exhibition", "cafe", "restaurant"], title: "가족과 실내 코스 추천!", intent: "family-indoor" }]
-            : [{ categories: ["park", "cafe", "restaurant"], title: "가족과 오전 나들이 코스 추천!", intent: "family-outing" }];
+            ? [{ categories: ["mall", "restaurant", "cafe"], title: "가족과 실내 쇼핑몰 코스 추천!", intent: "family-indoor" }]
+            : [{ categories: ["park", "restaurant", "cafe"], title: "가족과 오전 나들이 코스 추천!", intent: "family-outing" }];
         case "lunch":
           return [
             { categories: ["restaurant", "park", "cafe"], title: "가족과 점심 나들이 코스 추천!", intent: "family-lunch" },
+            { categories: ["mall", "restaurant", "cafe"], title: "가족과 편하게 보내는 쇼핑몰 코스 추천!", intent: "family-mall" },
             { categories: ["restaurant", "exhibition", "cafe"], title: "가족과 문화 코스 추천!", intent: "family-culture" },
+            { categories: ["restaurant", "cafe"], title: "가족과 카페 중심 코스 추천!", intent: "family-cafe" },
           ];
         case "afternoon":
           return indoorSafe
-            ? [{ categories: ["exhibition", "shopping", "cafe"], title: "가족과 실내 구경 코스 추천!", intent: "family-browse" }]
-            : [{ categories: ["park", "cafe", "exhibition"], title: "가족과 오후 나들이 코스 추천!", intent: "family-outing" }];
+            ? [
+                { categories: ["mall", "restaurant", "cafe"], title: "가족과 실내 쇼핑몰 코스 추천!", intent: "family-mall" },
+                { categories: ["exhibition", "restaurant", "cafe"], title: "가족과 실내 구경 코스 추천!", intent: "family-browse" },
+                { categories: ["restaurant", "cafe"], title: "가족과 카페 중심 코스 추천!", intent: "family-cafe" },
+              ]
+            : [
+                { categories: ["park", "restaurant", "cafe"], title: "가족과 오후 나들이 코스 추천!", intent: "family-outing" },
+                { categories: ["nature", "restaurant", "cafe"], title: "가족과 드라이브 느낌 코스 추천!", intent: "family-drive" },
+              ];
         case "evening":
           return [
             { categories: ["restaurant", "park", "cafe"], title: "가족과 저녁 산책 코스 추천!", intent: "family-evening" },
             { categories: ["restaurant", "cinema", "cafe"], title: "가족과 저녁 실내 코스 추천!", intent: "family-cinema" },
+            { categories: ["restaurant", "exhibition"], title: "가족과 문화생활 코스 추천!", intent: "family-culture" },
           ];
         case "night":
           return [{ categories: ["restaurant", "cafe"], title: "가족과 편한 야간 코스 추천!", intent: "family-night" }];
@@ -392,7 +415,7 @@ function buildFeaturedTemplates(
       if (condition === "야외최적") {
         return [{ categories: ["cafe", "park", "exhibition"], title, intent: "featured", featured: true }];
       }
-      return [{ categories: ["cafe", "exhibition", "shopping"], title, intent: "featured", featured: true }];
+      return [{ categories: ["cafe", "exhibition", "mall"], title, intent: "featured", featured: true }];
     case "lunch":
       if (condition === "야외최적") {
         return [{ categories: ["restaurant", "park", "cafe"], title, intent: "featured", featured: true }];
@@ -406,7 +429,7 @@ function buildFeaturedTemplates(
         return [{ categories: ["shopping", "cafe", "park"], title, intent: "featured", featured: true }];
       }
       if (condition === "실내전용" || condition === "실내선호") {
-        return [{ categories: ["exhibition", "cafe", "shopping"], title, intent: "featured", featured: true }];
+        return [{ categories: ["exhibition", "cafe", "mall"], title, intent: "featured", featured: true }];
       }
       return [{ categories: ["popup", "cafe", "exhibition"], title, intent: "featured", featured: true }];
     case "evening":
@@ -434,6 +457,7 @@ function buildConditionTemplates(
       return [
         { categories: ["cafe", "restaurant", "park"], title: "테라스 감성 코스 추천!", intent: "terrace" },
         { categories: ["shopping", "restaurant", "cafe"], title: "소품샵 구경 코스 추천!", intent: "shopping" },
+        { categories: ["mall", "restaurant", "cafe"], title: "실내에서 편하게 보내는 코스 추천!", intent: "mall" },
         { categories: ["restaurant", "park", "cafe"], title: "퇴근 후 힐링 코스 추천!", intent: "healing" },
       ];
     }
@@ -441,6 +465,7 @@ function buildConditionTemplates(
     if (slot === "afternoon") {
       return [
         { categories: ["shopping", "cafe", "park"], title: "햇살 좋은 산책 코스 추천!", intent: "walk" },
+        { categories: ["mall", "cafe", "restaurant"], title: "실내에서 편하게 쉬는 코스 추천!", intent: "mall" },
         { categories: ["popup", "cafe", "park"], title: "놀거리 많은 코스 추천!", intent: "browse" },
       ];
     }
@@ -451,12 +476,14 @@ function buildConditionTemplates(
     if (slot === "evening" || slot === "night") {
       return [
         { categories: ["restaurant", "activity"], title: "비 오는 날 실내 놀이 코스 추천!", intent: "activity" },
+        { categories: ["mall", "restaurant", "cafe"], title: "비 오는 날 쇼핑몰 코스 추천!", intent: "mall" },
         { categories: ["shopping", "restaurant", "cafe"], title: "비 오는 날 실내 코스 추천!", intent: "shopping" },
         { categories: ["restaurant", "exhibition", "cafe"], title: "저녁 문화 코스 추천!", intent: "culture" },
       ];
     }
     return [
       { categories: ["activity", "cafe"], title: "비 오는 날 실내 액티비티 코스 추천!", intent: "activity" },
+      { categories: ["mall", "restaurant", "cafe"], title: "비 오는 날 쇼핑몰 코스 추천!", intent: "mall" },
       { categories: ["exhibition", "cafe", "shopping"], title: "비 오는 날 실내 코스 추천!", intent: "culture" },
       { categories: ["shopping", "cafe", "popup"], title: "실내 구경 코스 추천!", intent: "shopping" },
     ];
@@ -466,11 +493,13 @@ function buildConditionTemplates(
     // 약간 덥거나 추운 날 → 실내 위주지만 activity 제목에 비 언급 X
     if (slot === "evening") {
       return [
+        { categories: ["mall", "restaurant", "cafe"], title: "실내 위주 저녁 코스 추천!", intent: "mall" },
         { categories: ["shopping", "restaurant", "cafe"], title: "실내 위주 저녁 코스 추천!", intent: "shopping" },
         { categories: ["restaurant", "exhibition", "cafe"], title: "저녁 문화 코스 추천!", intent: "culture" },
       ];
     }
     return [
+      { categories: ["mall", "cafe", "restaurant"], title: "실내에서 쉬기 좋은 코스 추천!", intent: "mall" },
       { categories: ["exhibition", "cafe", "shopping"], title: "실내에서 쉬기 좋은 코스 추천!", intent: "quiet" },
       { categories: ["shopping", "cafe", "popup"], title: "실내 구경 코스 추천!", intent: "shopping" },
     ];
@@ -542,10 +571,10 @@ function applyPreferencesToTemplate(
 
 function weatherScore(category: Place["category"], condition: WeatherCondition): number {
   const table: Record<WeatherCondition, Partial<Record<Place["category"], number>>> = {
-    야외최적: { park: 32, cafe: 25, popup: 22, restaurant: 20, exhibition: 15, shopping: 18, nature: 35, bar: 10, photo: 18, cinema: 12, activity: 10 },
-    쾌적:    { park: 24, cafe: 22, popup: 22, restaurant: 20, exhibition: 20, shopping: 20, nature: 26, bar: 16, photo: 20, cinema: 18, activity: 18 },
-    실내선호: { cafe: 28, exhibition: 28, popup: 24, restaurant: 22, park: 5, shopping: 27, nature: 5, bar: 22, photo: 24, cinema: 28, activity: 28 },
-    실내전용: { cafe: 30, exhibition: 30, popup: 25, restaurant: 24, park: 0, shopping: 28, nature: 0, bar: 24, photo: 26, cinema: 30, activity: 32 },
+    야외최적: { park: 32, cafe: 25, popup: 22, restaurant: 20, exhibition: 15, shopping: 18, mall: 12, nature: 35, bar: 10, photo: 18, cinema: 12, activity: 10 },
+    쾌적:    { park: 24, cafe: 22, popup: 22, restaurant: 20, exhibition: 20, shopping: 20, mall: 18, nature: 26, bar: 16, photo: 20, cinema: 18, activity: 18 },
+    실내선호: { cafe: 28, exhibition: 28, popup: 24, restaurant: 22, park: 5, shopping: 27, mall: 30, nature: 5, bar: 22, photo: 24, cinema: 28, activity: 28 },
+    실내전용: { cafe: 30, exhibition: 30, popup: 25, restaurant: 24, park: 0, shopping: 28, mall: 32, nature: 0, bar: 24, photo: 26, cinema: 30, activity: 32 },
   };
   return table[condition][category] ?? 15;
 }
@@ -559,6 +588,7 @@ function timeScore(category: Place["category"], slot: TimeSlot): number {
     exhibition: { dawn: 0,  morning: 20, lunch: 22, afternoon: 24, evening: 20, night: 6  },
     park:       { dawn: 20, morning: 18, lunch: 14, afternoon: 20, evening: 16, night: 5  },
     shopping:   { dawn: 0,  morning: 10, lunch: 14, afternoon: 22, evening: 18, night: 10 },
+    mall:       { dawn: 0,  morning: 12, lunch: 18, afternoon: 24, evening: 20, night: 12 },
     bar:        { dawn: 5,  morning: 0,  lunch: 0,  afternoon: 5,  evening: 22, night: 30 },
     photo:      { dawn: 0,  morning: 14, lunch: 18, afternoon: 22, evening: 20, night: 14 },
     nature:     { dawn: 18, morning: 22, lunch: 16, afternoon: 18, evening: 14, night: 2  },
@@ -578,23 +608,23 @@ function companionScore(
 
   const table: Record<Exclude<CompanionPreference, "상관없음">, Partial<Record<Place["category"], number>>> = {
     "아이와 함께": {
-      restaurant: 8, cafe: 6, popup: 2, exhibition: 10, park: 12, shopping: 4,
+      restaurant: 10, cafe: 6, popup: 2, exhibition: 10, park: 12, shopping: -10, mall: 16,
       bar: -22, photo: 2, nature: 8, cinema: 12, activity: 14,
     },
     데이트: {
-      restaurant: 8, cafe: 12, popup: 8, exhibition: 10, park: 8, shopping: 6,
+      restaurant: 8, cafe: 12, popup: 8, exhibition: 10, park: 8, shopping: 6, mall: 2,
       bar: 6, photo: 10, nature: 6, cinema: 12, activity: 3,
     },
     "친구들과": {
-      restaurant: 8, cafe: 4, popup: 3, exhibition: 2, park: 6, shopping: 4,
+      restaurant: 8, cafe: 4, popup: 3, exhibition: 2, park: 6, shopping: 4, mall: 5,
       bar: 10, photo: 4, nature: 8, cinema: 8, activity: 14,
     },
     직장모임: {
-      restaurant: 14, cafe: 8, popup: 2, exhibition: -2, park: -6, shopping: 2,
+      restaurant: 14, cafe: 8, popup: 2, exhibition: -2, park: -6, shopping: -10, mall: -6,
       bar: 12, photo: -6, nature: -8, cinema: -4, activity: 0,
     },
     가족과: {
-      restaurant: 12, cafe: 6, popup: 4, exhibition: 8, park: 10, shopping: 4,
+      restaurant: 14, cafe: 8, popup: 4, exhibition: 8, park: 10, shopping: -8, mall: 14,
       bar: -18, photo: 2, nature: 8, cinema: 8, activity: 6,
     },
   };
@@ -643,7 +673,7 @@ function companionPlaceHeuristicScore(
 
     if (place.goodForGroups) score += 12;
 
-    if (place.category === "park" || place.category === "nature" || place.category === "photo") {
+    if (place.category === "park" || place.category === "nature" || place.category === "photo" || place.category === "mall") {
       score -= 6;
     }
 
@@ -653,6 +683,7 @@ function companionPlaceHeuristicScore(
   }
 
   if (companion === "아이와 함께" || companion === "가족과") {
+    if (place.category === "mall") score += 10;
     if (place.goodForChildren) score += 8;
     if (place.menuForChildren) score += 4;
     if (place.restroom) score += 2;
@@ -755,7 +786,7 @@ function popularityScore(place: Place): number {
   if (!place.tags.includes("주변 인기 후보") && !place.tags.includes("인기")) return 0;
 
   if (place.category === "cafe" || place.category === "restaurant") return 16;
-  if (place.category === "shopping" || place.category === "popup" || place.category === "exhibition") {
+  if (place.category === "shopping" || place.category === "mall" || place.category === "popup" || place.category === "exhibition") {
     return 10;
   }
 
@@ -959,6 +990,7 @@ function inferIntentFromPlaces(places: Place[]): string {
   const categories = places.map((place) => place.category);
   if (categories.includes("park") || categories.includes("nature")) return "walk";
   if (categories.includes("activity")) return "activity";
+  if (categories.includes("mall")) return "mall";
   if (categories.includes("shopping")) return "shopping";
   if (categories.includes("exhibition") || categories.includes("popup")) return "culture";
   if (categories.includes("bar")) return "nightlife";

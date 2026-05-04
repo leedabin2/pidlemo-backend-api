@@ -567,6 +567,16 @@ async function fetchPlaceAtmosphere(
     restroom?: boolean;
   };
 
+  logger.info("placesNew", "✨ Places API (New) atmosphere 응답", {
+    placeId,
+    fieldMask,
+    parking: json.parkingOptions ? "Y" : "N",
+    goodForChildren: json.goodForChildren,
+    menuForChildren: json.menuForChildren,
+    goodForGroups: json.goodForGroups,
+    restroom: json.restroom,
+  });
+
   return {
     ...formatParkingSummary(json.parkingOptions),
     goodForChildren: json.goodForChildren,
@@ -647,6 +657,18 @@ export async function getPlaceAtmosphere(
     (!options.groups || cached?.goodForGroups !== undefined);
 
   if (cached && Date.now() < cached.expiresAt && alreadySatisfied) {
+    const intentBadges = [
+      options.children ? "🧒 아이동반" : null,
+      options.parking ? "🚗 주차" : null,
+      options.groups ? "👥 단체" : null,
+    ].filter(Boolean).join(" + ");
+    logger.info("placesNew", "♻️ 캐시 HIT", {
+      name,
+      intent: intentBadges || "기본",
+      parking: cached.hasParking,
+      goodForChildren: cached.goodForChildren,
+      goodForGroups: cached.goodForGroups,
+    });
     return {
       hasParking: cached.hasParking,
       parkingSummary: cached.parkingSummary,
@@ -663,6 +685,17 @@ export async function getPlaceAtmosphere(
       logger.warn("googlePlaces", "atmosphere 조회용 place_id를 찾지 못함", { name });
       return null;
     }
+
+    const intentBadges = [
+      options.children ? "🧒 아이동반" : null,
+      options.parking ? "🚗 주차" : null,
+      options.groups ? "👥 단체" : null,
+    ].filter(Boolean).join(" + ");
+    logger.info("placesNew", "조회 시작", {
+      name,
+      placeId,
+      intent: intentBadges || "기본",
+    });
 
     const atmosphere = await fetchPlaceAtmosphere(placeId, options);
     const nextCache: CacheEntry = {
@@ -681,15 +714,19 @@ export async function getPlaceAtmosphere(
       expiresAt: Date.now() + CACHE_TTL_MS,
     };
     cache.set(key, nextCache);
-    logger.info("googlePlaces", "Places API (New) atmosphere 보강 완료", {
+    logger.info("placesNew", "✅ Places API (New) 보강 완료", {
       name,
+      intent: intentBadges || "기본",
       parking: atmosphere.hasParking,
+      parkingSummary: atmosphere.parkingSummary ?? "-",
       goodForChildren: atmosphere.goodForChildren,
+      menuForChildren: atmosphere.menuForChildren,
       goodForGroups: atmosphere.goodForGroups,
+      restroom: atmosphere.restroom,
     });
     return atmosphere;
   } catch (err) {
-    logger.error("googlePlaces", "Places API (New) atmosphere 보강 오류", {
+    logger.error("placesNew", "❌ Places API (New) 보강 오류", {
       name,
       error: err instanceof Error ? err.message : String(err),
     });

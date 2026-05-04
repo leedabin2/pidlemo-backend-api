@@ -4,7 +4,7 @@ import type { Course, WeatherInfo } from "../types";
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY ?? "" });
 
 const CATEGORY_KR: Record<string, string> = {
-  cafe: "카페", restaurant: "맛집", shopping: "소품샵",
+  cafe: "카페", restaurant: "맛집", shopping: "소품샵", mall: "쇼핑몰",
   popup: "팝업/행사", exhibition: "전시", park: "공원",
   bar: "바", photo: "포토부스", nature: "자연", cinema: "영화관",
 };

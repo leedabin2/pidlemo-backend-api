@@ -8,6 +8,8 @@ import {
   getMockCafes,
   getNearByShoppingPlaces,
   getMockShoppingPlaces,
+  getNearByMallPlaces,
+  getMockMallPlaces,
   getNearByParks as getKakaoParks,
   getMockKakaoParks,
   getNearByWellnessPlaces,
@@ -53,6 +55,7 @@ const PLACE_CATEGORY_ORDER: PlaceCategory[] = [
   "cafe",
   "restaurant",
   "shopping",
+  "mall",
   "popup",
   "exhibition",
   "park",
@@ -157,10 +160,10 @@ function pickAtmosphereTargets(places: Place[], options: RecommendationOptions):
   const byStage = [...places].sort((a, b) => candidateStageScore(b) - candidateStageScore(a));
 
   if (options.transport === "차량") {
-    addTop(byStage.filter((p) => ["restaurant", "cafe", "shopping", "cinema", "activity"].includes(p.category)), 3);
+    addTop(byStage.filter((p) => ["restaurant", "cafe", "shopping", "mall", "cinema", "activity"].includes(p.category)), 3);
   }
   if (options.companion === "아이와 함께" || options.companion === "가족과") {
-    addTop(byStage.filter((p) => ["park", "exhibition", "activity", "cinema", "restaurant", "cafe"].includes(p.category)), 4);
+    addTop(byStage.filter((p) => ["mall", "park", "exhibition", "activity", "cinema", "restaurant", "cafe"].includes(p.category)), 4);
   }
   if (options.companion === "직장모임") {
     addTop(byStage.filter((p) => ["restaurant", "bar", "cafe"].includes(p.category)), 4);
@@ -183,6 +186,19 @@ async function enrichWithGoogleAtmosphere(
     transport: options.transport,
     companion: options.companion,
   });
+  logger.list(
+    "placesNew",
+    `🎯 atmosphere 대상 ${targets.length}개`,
+    targets.map((place) => {
+      const badges = [
+        options.transport === "차량" ? "🚗" : null,
+        options.companion === "아이와 함께" || options.companion === "가족과" ? "🧒" : null,
+        options.companion === "직장모임" ? "👥" : null,
+      ].filter(Boolean).join("");
+      return `${badges} ${place.name}(${place.category})`;
+    }),
+    12
+  );
 
   const byId = new Map<string, Place>(places.map((place) => [place.id, place]));
 
@@ -260,7 +276,8 @@ function parseCompanion(value: unknown): RecommendationOptions["companion"] {
 const CATEGORY_TITLE: Record<PlaceCategory, string> = {
   cafe: "카페",
   restaurant: "맛집",
-  shopping: "소품샵/쇼핑",
+  shopping: "감성 소품샵",
+  mall: "쇼핑몰",
   popup: "팝업/행사",
   exhibition: "전시/문화",
   park: "공원 산책",
@@ -275,6 +292,7 @@ const CATEGORY_CANDIDATE_LIMIT: Record<PlaceCategory, number> = {
   cafe: 8,
   restaurant: 8,
   shopping: 6,
+  mall: 5,
   popup: 6,
   exhibition: 6,
   park: 5,
@@ -409,7 +427,7 @@ function selectCandidatePlaces(places: Place[]): Place[] {
 
 // ── Layer 1: 장소 풀 캐시 (위치 격자 기반, 2시간) ────────────────
 interface PlacePool {
-  cafes: Place[]; restaurants: Place[]; shoppingPlaces: Place[];
+  cafes: Place[]; restaurants: Place[]; shoppingPlaces: Place[]; mallPlaces: Place[];
   kakaoParks: Place[]; photoBooths: Place[]; bars: Place[];
   naturePlaces: Place[]; cinemas: Place[]; kakaoPopups: Place[];
   popularPlaces: Place[]; kakaoTouristSpots: Place[]; kakaoCultureVenues: Place[];
@@ -494,7 +512,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     } else {
       logger.info("recommend", "장소 풀 캐시 MISS → API 수집", { key: pKey });
       const [
-        cafes, restaurants, shoppingPlaces, kakaoParks,
+        cafes, restaurants, shoppingPlaces, mallPlaces, kakaoParks,
         photoBooths, bars, naturePlaces, cinemas,
         kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
         tourAttractions, tourCulture, tourFestivals,
@@ -503,6 +521,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         hasKakaoKey ? getNearByCafes(coords) : Promise.resolve(getMockCafes(coords)),
         hasKakaoKey ? getNearByRestaurants(coords) : Promise.resolve([]),
         hasKakaoKey ? getNearByShoppingPlaces(coords) : Promise.resolve(getMockShoppingPlaces(coords)),
+        hasKakaoKey ? getNearByMallPlaces(coords) : Promise.resolve(getMockMallPlaces(coords)),
         hasKakaoKey ? getKakaoParks(coords) : Promise.resolve(getMockKakaoParks(coords)),
         hasKakaoKey ? getNearByPhotoBooth(coords) : Promise.resolve([]),
         hasKakaoKey ? getNearByBars(coords) : Promise.resolve([]),
@@ -521,7 +540,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       ]);
 
       pool = {
-        cafes, restaurants, shoppingPlaces, kakaoParks,
+        cafes, restaurants, shoppingPlaces, mallPlaces, kakaoParks,
         photoBooths, bars, naturePlaces, cinemas,
         kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
         tourAttractions, tourCulture, tourFestivals,
@@ -531,7 +550,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     }
 
     const {
-      cafes, restaurants, shoppingPlaces, kakaoParks,
+      cafes, restaurants, shoppingPlaces, mallPlaces, kakaoParks,
       photoBooths, bars, naturePlaces, cinemas,
       kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
       tourAttractions, tourCulture, tourFestivals,
@@ -565,6 +584,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       ...cafes,
       ...restaurants,
       ...shoppingPlaces,
+      ...mallPlaces,
       ...rawPopups,
       ...rawParks,
       ...curatedCulture,
@@ -579,6 +599,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       cafe: cafes.length,
       restaurant: restaurants.length,
       shopping: shoppingPlaces.length,
+      mall: mallPlaces.length,
       popup: `${rawPopups.length}(공공${primaryPopups.length}/카카오${kakaoPopups.length})`,
       park: rawParks.length,
       exhibition: curatedCulture.length,
@@ -628,6 +649,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         environment: options.environment ?? "상관없음",
         durationBudgetMinutes: null,
         weatherAware: options.weatherAware ?? true,
+        transport: options.transport,
         companion: options.companion ?? "상관없음",
       },
     };
