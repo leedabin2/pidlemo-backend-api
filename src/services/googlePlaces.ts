@@ -1,4 +1,6 @@
 import type { Coordinates } from "../types";
+import { recordQuotaUsage } from "./quotaTracker";
+import { logger } from "../utils/logger";
 
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY ?? "";
 // 정적 데이터는 짧게 캐시하고, 영업 여부는 periods로 매 요청 시각에 다시 계산
@@ -32,6 +34,12 @@ export interface PlaceDetails {
   reviewCount: number | null;
   priceLevel: 0 | 1 | 2 | 3 | 4 | null;
   photoUrl: string | null;
+  hasParking?: boolean;
+  parkingSummary?: string | null;
+  goodForChildren?: boolean;
+  menuForChildren?: boolean;
+  goodForGroups?: boolean;
+  restroom?: boolean;
 }
 
 interface CacheEntry {
@@ -41,7 +49,28 @@ interface CacheEntry {
   priceLevel: 0 | 1 | 2 | 3 | 4 | null;
   photoUrl: string | null;
   periods: Period[]; // 영업시간 periods — isOpen은 캐시 안 함, 매번 실시간 계산
+  hasParking?: boolean;
+  parkingSummary?: string | null;
+  goodForChildren?: boolean;
+  menuForChildren?: boolean;
+  goodForGroups?: boolean;
+  restroom?: boolean;
   expiresAt: number;
+}
+
+export interface PlaceAtmosphereOptions {
+  parking?: boolean;
+  children?: boolean;
+  groups?: boolean;
+}
+
+export interface PlaceAtmosphereDetails {
+  hasParking?: boolean;
+  parkingSummary?: string | null;
+  goodForChildren?: boolean;
+  menuForChildren?: boolean;
+  goodForGroups?: boolean;
+  restroom?: boolean;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -204,6 +233,44 @@ function detailsFromCache(entry: CacheEntry): PlaceDetails {
     reviewCount: entry.reviewCount,
     priceLevel: entry.priceLevel,
     photoUrl: entry.photoUrl,
+    hasParking: entry.hasParking,
+    parkingSummary: entry.parkingSummary,
+    goodForChildren: entry.goodForChildren,
+    menuForChildren: entry.menuForChildren,
+    goodForGroups: entry.goodForGroups,
+    restroom: entry.restroom,
+  };
+}
+
+function atmosphereFieldsMask(options: PlaceAtmosphereOptions): string | null {
+  const fields = new Set<string>();
+  if (options.parking) fields.add("parkingOptions");
+  if (options.children) {
+    fields.add("goodForChildren");
+    fields.add("menuForChildren");
+    fields.add("restroom");
+  }
+  if (options.groups) {
+    fields.add("goodForGroups");
+    fields.add("reservable");
+  }
+  return fields.size > 0 ? [...fields].join(",") : null;
+}
+
+function formatParkingSummary(parkingOptions?: Record<string, boolean>): { hasParking?: boolean; parkingSummary?: string | null } {
+  if (!parkingOptions) return {};
+
+  const labels: string[] = [];
+  if (parkingOptions.freeParkingLot || parkingOptions.freeGarageParking) labels.push("무료 주차");
+  if (parkingOptions.paidParkingLot || parkingOptions.paidGarageParking) labels.push("유료 주차");
+  if (parkingOptions.freeStreetParking) labels.push("무료 노상 주차");
+  if (parkingOptions.paidStreetParking) labels.push("유료 노상 주차");
+  if (parkingOptions.valetParking) labels.push("발렛 주차");
+
+  const hasParking = labels.length > 0;
+  return {
+    hasParking,
+    parkingSummary: hasParking ? labels.join(" · ") : null,
   };
 }
 
@@ -291,16 +358,20 @@ function isValidCandidate(
   const maxDistance =
     matchType === "primary" ? PRIMARY_MATCH_MAX_DISTANCE_METERS : STRIPPED_MATCH_MAX_DISTANCE_METERS;
   if (distanceMeters > maxDistance) {
-    console.log(
-      `[googlePlaces] reject candidate "${candidate.name}" distance=${Math.round(distanceMeters)}m expected="${expectedName}"`
-    );
+    logger.info("googlePlaces", "후보 제외: 거리 불일치", {
+      candidate: candidate.name,
+      expected: expectedName,
+      distance: `${Math.round(distanceMeters)}m`,
+    });
     return false;
   }
 
   if (!addressesLookCompatible(expectedAddress, candidate.formatted_address, distanceMeters)) {
-    console.log(
-      `[googlePlaces] reject candidate "${candidate.name}" address mismatch expected="${expectedAddress}" candidate="${candidate.formatted_address}"`
-    );
+    logger.info("googlePlaces", "후보 제외: 주소 불일치", {
+      candidate: candidate.name,
+      expectedAddress,
+      candidateAddress: candidate.formatted_address,
+    });
     return false;
   }
 
@@ -316,9 +387,14 @@ async function findPlaceIdByQuery(
   const input = encodeURIComponent(query);
   const fields = ["place_id", "name", "formatted_address", "geometry"].join(",");
   const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${input}&inputtype=textquery&locationbias=circle:1500@${coords.lat},${coords.lng}&fields=${fields}&key=${GOOGLE_KEY}&language=ko`;
+  recordQuotaUsage("google_find_place_legacy_pro");
   const res = await fetch(url);
   const json = await res.json() as { status?: string; candidates?: FindPlaceCandidate[] };
-  console.log(`[googlePlaces] findPlace "${query}" → status:${json.status} candidates:${json.candidates?.length ?? 0}`);
+  logger.info("googlePlaces", "findPlace", {
+    query,
+    status: json.status,
+    candidates: json.candidates?.length ?? 0,
+  });
 
   const matched = json.candidates?.find((candidate) =>
     isValidCandidate(candidate, expectedName, coords, expectedAddress)
@@ -347,9 +423,14 @@ async function findPlaceIdByPhone(
   const input = encodeURIComponent(intlPhone);
   const fields = ["place_id", "name", "formatted_address", "geometry"].join(",");
   const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${input}&inputtype=phonenumber&locationbias=circle:2000@${coords.lat},${coords.lng}&fields=${fields}&key=${GOOGLE_KEY}&language=ko`;
+  recordQuotaUsage("google_find_place_legacy_pro");
   const res = await fetch(url);
   const json = await res.json() as { status?: string; candidates?: FindPlaceCandidate[] };
-  console.log(`[googlePlaces] findPlace by phone "${intlPhone}" → status:${json.status} candidates:${json.candidates?.length ?? 0}`);
+  logger.info("googlePlaces", "findPlace by phone", {
+    phone: intlPhone,
+    status: json.status,
+    candidates: json.candidates?.length ?? 0,
+  });
 
   const matched = json.candidates?.find((candidate) => {
     if (!candidate.name || !candidate.geometry?.location) return false;
@@ -361,7 +442,12 @@ async function findPlaceIdByPhone(
     if (distanceMeters > PRIMARY_MATCH_MAX_DISTANCE_METERS) return false;
     return addressesLookCompatible(expectedAddress, candidate.formatted_address, distanceMeters);
   });
-  if (matched) console.log(`[googlePlaces] 전화번호로 매칭: "${expectedName}" → "${matched.name}"`);
+  if (matched) {
+    logger.info("googlePlaces", "전화번호 매칭 성공", {
+      expected: expectedName,
+      matched: matched.name,
+    });
+  }
   return matched?.place_id ?? null;
 }
 
@@ -382,7 +468,10 @@ async function findPlaceId(
   if (stripped && stripped !== name) {
     const id2 = await findPlaceIdByQuery(stripped, name, coords, address);
     if (id2) {
-      console.log(`[googlePlaces] 지점명 제거로 매칭: "${name}" → "${stripped}"`);
+      logger.info("googlePlaces", "지점명 제거로 매칭", {
+        original: name,
+        stripped,
+      });
       return id2;
     }
   }
@@ -393,7 +482,7 @@ async function findPlaceId(
     if (id3) return id3;
   }
 
-  console.log(`[googlePlaces] place_id 못 찾음: ${name}`);
+  logger.warn("googlePlaces", "place_id를 찾지 못함", { name });
   return null;
 }
 
@@ -407,6 +496,7 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
   ].join(",");
 
   const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${fields}&key=${GOOGLE_KEY}&language=ko`;
+  recordQuotaUsage("google_place_details_legacy_pro");
   const res = await fetch(url);
   const json = await res.json() as {
     result?: {
@@ -442,6 +532,50 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
   };
 }
 
+async function fetchPlaceAtmosphere(
+  placeId: string,
+  options: PlaceAtmosphereOptions
+): Promise<PlaceAtmosphereDetails> {
+  const fieldMask = atmosphereFieldsMask(options);
+  if (!fieldMask) return {};
+
+  const url = `https://places.googleapis.com/v1/places/${placeId}`;
+  recordQuotaUsage("google_place_details_enterprise_atmosphere");
+  const res = await fetch(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": GOOGLE_KEY,
+      "X-Goog-FieldMask": fieldMask,
+    },
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    logger.warn("googlePlaces", "Places API (New) atmosphere 조회 실패", {
+      placeId,
+      status: res.status,
+      body,
+    });
+    return {};
+  }
+
+  const json = await res.json() as {
+    parkingOptions?: Record<string, boolean>;
+    goodForChildren?: boolean;
+    menuForChildren?: boolean;
+    goodForGroups?: boolean;
+    restroom?: boolean;
+  };
+
+  return {
+    ...formatParkingSummary(json.parkingOptions),
+    goodForChildren: json.goodForChildren,
+    menuForChildren: json.menuForChildren,
+    goodForGroups: json.goodForGroups,
+    restroom: json.restroom,
+  };
+}
+
 export async function getPlaceDetails(
   name: string,
   coords: Coordinates,
@@ -457,7 +591,7 @@ export async function getPlaceDetails(
   try {
     const placeId = await findPlaceId(name, coords, address, phone);
     if (!placeId) {
-      console.log(`[googlePlaces] 검증 가능한 place_id 못 찾음: ${name}`);
+      logger.warn("googlePlaces", "검증 가능한 place_id를 찾지 못함", { name });
       return null;
     }
 
@@ -469,12 +603,96 @@ export async function getPlaceDetails(
       priceLevel: details.priceLevel,
       photoUrl: details.photoUrl,
       periods: details.hours?.periods ?? [],
+      hasParking: details.hasParking,
+      parkingSummary: details.parkingSummary,
+      goodForChildren: details.goodForChildren,
+      menuForChildren: details.menuForChildren,
+      goodForGroups: details.goodForGroups,
+      restroom: details.restroom,
       expiresAt: Date.now() + CACHE_TTL_MS,
     });
-    console.log(`[googlePlaces] ✅ ${name} → rating:${details.rating} reviews:${details.reviewCount} open:${details.hours?.isOpenNow}`);
+    logger.info("googlePlaces", "기본 상세 보강 완료", {
+      name,
+      rating: details.rating ?? "-",
+      reviews: details.reviewCount ?? "-",
+      open: details.hours?.isOpenNow,
+    });
     return details;
   } catch (err) {
-    console.error(`[googlePlaces] 오류 (${name}):`, err);
+    logger.error("googlePlaces", "기본 상세 보강 오류", {
+      name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+export async function getPlaceAtmosphere(
+  name: string,
+  coords: Coordinates,
+  options: PlaceAtmosphereOptions,
+  address?: string,
+  phone?: string
+): Promise<PlaceAtmosphereDetails | null> {
+  if (!GOOGLE_KEY) return null;
+
+  const key = `${name}|${address ?? ""}|${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
+  const cached = cache.get(key);
+  const fieldMask = atmosphereFieldsMask(options);
+  if (!fieldMask) return null;
+
+  const alreadySatisfied =
+    (!options.parking || cached?.parkingSummary !== undefined || cached?.hasParking !== undefined) &&
+    (!options.children || cached?.goodForChildren !== undefined || cached?.menuForChildren !== undefined || cached?.restroom !== undefined) &&
+    (!options.groups || cached?.goodForGroups !== undefined);
+
+  if (cached && Date.now() < cached.expiresAt && alreadySatisfied) {
+    return {
+      hasParking: cached.hasParking,
+      parkingSummary: cached.parkingSummary,
+      goodForChildren: cached.goodForChildren,
+      menuForChildren: cached.menuForChildren,
+      goodForGroups: cached.goodForGroups,
+      restroom: cached.restroom,
+    };
+  }
+
+  try {
+    const placeId = cached?.placeId ?? await findPlaceId(name, coords, address, phone);
+    if (!placeId) {
+      logger.warn("googlePlaces", "atmosphere 조회용 place_id를 찾지 못함", { name });
+      return null;
+    }
+
+    const atmosphere = await fetchPlaceAtmosphere(placeId, options);
+    const nextCache: CacheEntry = {
+      placeId,
+      rating: cached?.rating ?? null,
+      reviewCount: cached?.reviewCount ?? null,
+      priceLevel: cached?.priceLevel ?? null,
+      photoUrl: cached?.photoUrl ?? null,
+      periods: cached?.periods ?? [],
+      hasParking: atmosphere.hasParking ?? cached?.hasParking,
+      parkingSummary: atmosphere.parkingSummary ?? cached?.parkingSummary ?? null,
+      goodForChildren: atmosphere.goodForChildren ?? cached?.goodForChildren,
+      menuForChildren: atmosphere.menuForChildren ?? cached?.menuForChildren,
+      goodForGroups: atmosphere.goodForGroups ?? cached?.goodForGroups,
+      restroom: atmosphere.restroom ?? cached?.restroom,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    };
+    cache.set(key, nextCache);
+    logger.info("googlePlaces", "Places API (New) atmosphere 보강 완료", {
+      name,
+      parking: atmosphere.hasParking,
+      goodForChildren: atmosphere.goodForChildren,
+      goodForGroups: atmosphere.goodForGroups,
+    });
+    return atmosphere;
+  } catch (err) {
+    logger.error("googlePlaces", "Places API (New) atmosphere 보강 오류", {
+      name,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

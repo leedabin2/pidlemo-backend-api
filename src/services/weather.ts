@@ -1,12 +1,13 @@
 import axios from "axios";
 import type { Coordinates, ForecastEntry, WeatherInfo } from "../types";
+import { logger } from "../utils/logger";
 
 const API_KEY = process.env.OPENWEATHER_API_KEY ?? "";
 const BASE_URL = "https://api.openweathermap.org/data/2.5";
 
 export async function getWeather(coords: Coordinates): Promise<WeatherInfo> {
   if (!API_KEY) {
-    console.warn("[weather] OPENWEATHER_API_KEY 없음 → 맑음으로 기본값 사용");
+    logger.warn("weather", "OPENWEATHER_API_KEY 없음 → 기본 날씨 사용");
     return mockWeather();
   }
 
@@ -24,7 +25,12 @@ export async function getWeather(coords: Coordinates): Promise<WeatherInfo> {
   const main: string = data.weather[0].main;
 
   const feelsLike = Math.round(data.main.feels_like);
-  console.log(`[weather] code=${code} temp=${Math.round(data.main.temp)}°C feelsLike=${feelsLike}°C desc=${data.weather[0].description}`);
+  logger.info("weather", "현재 날씨", {
+    code,
+    temp: `${Math.round(data.main.temp)}°C`,
+    feelsLike: `${feelsLike}°C`,
+    desc: data.weather[0].description,
+  });
 
   return {
     code,
@@ -68,7 +74,9 @@ export async function getWeatherForecast(coords: Coordinates): Promise<ForecastE
       };
     });
   } catch (err) {
-    console.error("[weather] forecast 오류:", err);
+    logger.error("weather", "forecast 조회 오류", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return mockForecast();
   }
 }

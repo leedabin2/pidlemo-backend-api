@@ -1,6 +1,7 @@
 import axios from "axios";
 import type { Coordinates, Place } from "../types";
 import { getOpenStateNow } from "../utils/openHours";
+import { logger } from "../utils/logger";
 
 const API_KEY = process.env.KAKAO_REST_API_KEY ?? "";
 const CATEGORY_URL = "https://dapi.kakao.com/v2/local/search/category.json";
@@ -199,11 +200,16 @@ async function searchByCategory(
     );
   } catch (err) {
     if (axios.isAxiosError(err)) {
-      console.error(
-        `[kakao] category search 실패 (${categoryCode}) status=${err.response?.status ?? "unknown"} message=${JSON.stringify(err.response?.data ?? {})}`
-      );
+      logger.error("kakao", "category search 실패", {
+        categoryCode,
+        status: err.response?.status ?? "unknown",
+        message: JSON.stringify(err.response?.data ?? {}),
+      });
     } else {
-      console.error(`[kakao] category search 실패 (${categoryCode})`, err);
+      logger.error("kakao", "category search 실패", {
+        categoryCode,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     return [];
   }
@@ -237,11 +243,16 @@ async function searchByKeyword(
     );
   } catch (err) {
     if (axios.isAxiosError(err)) {
-      console.error(
-        `[kakao] keyword search 실패 (${query}) status=${err.response?.status ?? "unknown"} message=${JSON.stringify(err.response?.data ?? {})}`
-      );
+      logger.error("kakao", "keyword search 실패", {
+        query,
+        status: err.response?.status ?? "unknown",
+        message: JSON.stringify(err.response?.data ?? {}),
+      });
     } else {
-      console.error(`[kakao] keyword search 실패 (${query})`, err);
+      logger.error("kakao", "keyword search 실패", {
+        query,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     return [];
   }
@@ -281,7 +292,7 @@ async function docsToPlaces(
 export async function getNearByCafes(coords: Coordinates): Promise<Place[]> {
   const docs = await searchByCategory("CE7", coords, 16);
   const filtered = docs.filter(isCafeCandidate);
-  console.log(`[kakao] 카페 검색 결과: ${docs.length}개 → 제외 후 ${filtered.length}개`);
+  logger.info("kakao", "카페 검색 결과", { raw: docs.length, filtered: filtered.length });
   return docsToPlaces(filtered.slice(0, DEFAULT_CATEGORY_LIMIT), "cafe");
 }
 
@@ -292,7 +303,7 @@ export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]
   const filtered = docs.filter(
     (doc) => !RESTAURANT_EXCLUDE_CATEGORY_KW.some((kw) => doc.category_name.includes(kw))
   );
-  console.log(`[kakao] 음식점 검색 결과: ${docs.length}개 → 베이커리/분식 제외 후 ${filtered.length}개`);
+  logger.info("kakao", "음식점 검색 결과", { raw: docs.length, filtered: filtered.length });
   return docsToPlaces(filtered.slice(0, DEFAULT_CATEGORY_LIMIT), "restaurant");
 }
 
@@ -309,14 +320,14 @@ export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Plac
   }
 
   const allDocs = [...deduped.values()];
-  console.log(`[kakao] 쇼핑 후보 ${allDocs.length}개:`, allDocs.map(d => `${d.place_name}(${d.category_name})`).join(", "));
+  logger.list("kakao", `쇼핑 후보 ${allDocs.length}개`, allDocs.map((d) => `${d.place_name}(${d.category_name})`), 12);
 
   const shoppingDocs = allDocs
     .filter(isCuratedShoppingCandidate)
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, DEFAULT_CATEGORY_LIMIT);
 
-  console.log(`[kakao] 쇼핑 필터 후 ${shoppingDocs.length}개:`, shoppingDocs.map(d => `${d.place_name}(${d.category_name})`).join(", "));
+  logger.list("kakao", `쇼핑 필터 후 ${shoppingDocs.length}개`, shoppingDocs.map((d) => `${d.place_name}(${d.category_name})`), 12);
 
   // subCategory를 쇼핑 분류 기준으로 재지정
   const places = await docsToPlaces(shoppingDocs, "shopping");
@@ -339,7 +350,7 @@ export async function getNearByPhotoBooth(coords: Coordinates): Promise<Place[]>
     .filter((doc) => matchesCategoryAllowlist(doc.category_name, PHOTO_ALLOW_CATEGORY_KW, PHOTO_EXCLUDE_CATEGORY_KW))
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, 6);
-  console.log(`[kakao] 포토부스 검색 결과: ${photoDocs.length}개`);
+  logger.info("kakao", "포토부스 검색 결과", { count: photoDocs.length });
   const places = await docsToPlaces(photoDocs, "photo");
   return places.map((p, i) => ({
     ...p,
@@ -364,7 +375,7 @@ export async function getNearByBars(coords: Coordinates): Promise<Place[]> {
     .filter((doc) => matchesCategoryAllowlist(doc.category_name, BAR_ALLOW_CATEGORY_KW, BAR_EXCLUDE_CATEGORY_KW))
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, 6);
-  console.log(`[kakao] 바/이자카야 검색 결과: ${barDocs.length}개`);
+  logger.info("kakao", "바/이자카야 검색 결과", { count: barDocs.length });
   const places = await docsToPlaces(barDocs, "bar");
   return places.map((p, i) => {
     const name = barDocs[i]?.place_name ?? "";
@@ -391,7 +402,7 @@ export async function getNearByNaturePlaces(coords: Coordinates): Promise<Place[
     .filter((doc) => matchesCategoryAllowlist(doc.category_name, NATURE_ALLOW_CATEGORY_KW, NATURE_EXCLUDE_CATEGORY_KW))
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, 6);
-  console.log(`[kakao] 자연 검색 결과: ${natureDocs.length}개`);
+  logger.info("kakao", "자연 검색 결과", { count: natureDocs.length });
   const places = await docsToPlaces(natureDocs, "nature");
   return places.map((p) => ({
     ...p,
@@ -411,7 +422,7 @@ export async function getNearByCinemas(coords: Coordinates): Promise<Place[]> {
       doc.category_name.includes("영화관")
     )
     .slice(0, 6);
-  console.log(`[kakao] 영화관 검색 결과: ${cinemaDocs.length}개`);
+  logger.info("kakao", "영화관 검색 결과", { count: cinemaDocs.length });
   const places = await docsToPlaces(cinemaDocs, "cinema");
   return places.map((p) => ({
     ...p,
@@ -429,7 +440,7 @@ export async function getNearByWellnessPlaces(coords: Coordinates): Promise<Plac
     }
   }
   const wellnessDocs = [...deduped.values()].slice(0, 6);
-  console.log(`[kakao] 찜질방/웰니스 검색 결과: ${wellnessDocs.length}개`);
+  logger.info("kakao", "찜질방/웰니스 검색 결과", { count: wellnessDocs.length });
   const places = await docsToPlaces(wellnessDocs, "park");
   return places.map((p) => ({
     ...p,
@@ -471,7 +482,7 @@ export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
       return PARK_CATEGORY_KW.some((kw) => cat.includes(kw));
     })
     .slice(0, 7);
-  console.log(`[kakao] 공원 검색 결과: ${parkDocs.length}개`);
+  logger.info("kakao", "공원 검색 결과", { count: parkDocs.length });
   const places = await docsToPlaces(parkDocs, "park");
   return places.map((p) => ({
     ...p,
@@ -489,7 +500,7 @@ export async function getNearByTouristSpots(coords: Coordinates): Promise<Place[
   const filtered = docs
     .filter(isTouristSpotCandidate)
     .slice(0, DEFAULT_CATEGORY_LIMIT);
-  console.log(`[kakao] 관광명소(AT4) ${filtered.length}개:`, filtered.map(d => d.place_name).join(", "));
+  logger.list("kakao", `관광명소(AT4) ${filtered.length}개`, filtered.map((d) => d.place_name), 12);
   return filtered.map((doc) => ({
     id: `${getTouristSpotCategory(doc)}-${doc.id}`,
     name: doc.place_name,
@@ -521,7 +532,7 @@ export async function getNearByCultureVenues(coords: Coordinates): Promise<Place
     .filter(isCultureVenueCandidate)
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, DEFAULT_CATEGORY_LIMIT);
-  console.log(`[kakao] 문화시설 ${cultureDocs.length}개:`, cultureDocs.map(d => d.place_name).join(", "));
+  logger.list("kakao", `문화시설 ${cultureDocs.length}개`, cultureDocs.map((d) => d.place_name), 12);
   const places = await docsToPlaces(cultureDocs, "exhibition");
   return places.map((p, i) => {
     const categoryName = cultureDocs[i]?.category_name ?? "";
@@ -566,7 +577,7 @@ export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place
     return true;
   });
 
-  console.log(`[kakao] 인기 장소(accuracy): ${deduped.length}개`);
+  logger.info("kakao", "인기 장소(accuracy)", { count: deduped.length });
   return deduped;
 }
 
@@ -590,7 +601,7 @@ export async function getNearByKakaoPopups(coords: Coordinates): Promise<Place[]
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, DEFAULT_CATEGORY_LIMIT);
 
-  console.log(`[kakao] 팝업/행사 키워드 검색: ${popupDocs.length}개`, popupDocs.map(d => d.place_name).join(", "));
+  logger.list("kakao", `팝업/행사 키워드 검색 ${popupDocs.length}개`, popupDocs.map((d) => d.place_name), 12);
   return docsToPlaces(popupDocs, "popup");
 }
 
@@ -605,16 +616,18 @@ export async function getNearByActivityPlaces(coords: Coordinates): Promise<Plac
   }
 
   const allDeduped = [...deduped.values()];
-  console.log(`[activity] 카카오 원본 ${allDeduped.length}개:`);
-  for (const doc of allDeduped) {
-    console.log(`  - "${doc.place_name}" | category: "${doc.category_name}" | distance: ${doc.distance}m`);
-  }
+  logger.block("activity", `카카오 원본 ${allDeduped.length}개`, allDeduped.map(
+    (doc) => `"${doc.place_name}" | category: "${doc.category_name}" | distance: ${doc.distance}m`
+  ));
 
   const activityDocs = allDeduped
     .filter((doc) => {
       const included = matchesCategoryAllowlist(doc.category_name, ACTIVITY_ALLOW_CATEGORY_KW, ACTIVITY_EXCLUDE_CATEGORY_KW);
       if (!included) {
-        console.log(`  [제외] "${doc.place_name}" (category mismatch: ${doc.category_name})`);
+        logger.info("activity", "후보 제외", {
+          name: doc.place_name,
+          category: doc.category_name,
+        });
         return false;
       }
       return true;
@@ -622,7 +635,7 @@ export async function getNearByActivityPlaces(coords: Coordinates): Promise<Plac
     .sort((a, b) => parseInt(a.distance) - parseInt(b.distance))
     .slice(0, 6);
 
-  console.log(`[kakao] 액티비티 검색 결과: ${activityDocs.length}개`, activityDocs.map(d => d.place_name).join(", "));
+  logger.list("kakao", `액티비티 검색 결과 ${activityDocs.length}개`, activityDocs.map((d) => d.place_name), 12);
 
   const places = await docsToPlaces(activityDocs, "activity");
   return places.map((p, i) => {

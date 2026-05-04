@@ -32,6 +32,12 @@ export interface Place {
   googleReviewCount?: number;     // 리뷰 수
   priceLevel?: 0 | 1 | 2 | 3 | 4; // 0=무료, 1=저렴, 2=보통, 3=비쌈, 4=매우 비쌈
   photoUrl?: string;              // 대표 이미지 URL
+  hasParking?: boolean;
+  parkingSummary?: string;
+  goodForChildren?: boolean;
+  menuForChildren?: boolean;
+  goodForGroups?: boolean;
+  restroom?: boolean;
   googleHours?: {
     isOpenNow: boolean;
     closesAtMinutesFromNow: number | null;
@@ -65,6 +71,8 @@ export interface RecommendQuery {
   categories?: PlaceCategory[];
   duration?: string;
   environment?: "실내" | "야외" | "상관없음";
+  transport?: "도보" | "대중교통" | "차량";
+  companion?: "상관없음" | "아이와 함께" | "데이트" | "친구들과" | "직장모임" | "가족과";
   weatherAware?: boolean;
 }
 
