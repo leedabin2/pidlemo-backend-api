@@ -11,6 +11,7 @@ export interface CourseTemplate {
   title: string;
   intent: string;
   featured?: boolean;
+  blocksIntents?: string[];
 }
 
 export interface RecommendationOptions {
@@ -20,6 +21,9 @@ export interface RecommendationOptions {
   weatherAware?: boolean;
   transport?: "도보" | "대중교통" | "차량";
   companion?: CompanionPreference;
+  requireParking?: boolean;
+  requireRestroom?: boolean;
+  requireChildFacilities?: boolean;
 }
 
 export interface NormalizedOptions {
@@ -29,6 +33,9 @@ export interface NormalizedOptions {
   weatherAware: boolean;
   transport?: "도보" | "대중교통" | "차량";
   companion: CompanionPreference;
+  requireParking: boolean;
+  requireRestroom: boolean;
+  requireChildFacilities: boolean;
 }
 
 export interface ScoreContext {

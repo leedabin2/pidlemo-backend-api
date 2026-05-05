@@ -2,7 +2,9 @@ type QuotaSku =
   | "google_find_place_legacy_pro"
   | "google_place_details_legacy_pro"
   | "google_routes_essentials"
-  | "google_place_details_enterprise_atmosphere";
+  | "google_place_details_enterprise_atmosphere"
+  | "google_text_search_new"
+  | "google_nearby_search_new";
 
 interface QuotaConfig {
   label: string;
@@ -25,6 +27,14 @@ const QUOTA_CONFIG: Record<QuotaSku, QuotaConfig> = {
   google_place_details_enterprise_atmosphere: {
     label: "Google Place Details Enterprise+Atmosphere",
     freeCap: 1000,
+  },
+  google_text_search_new: {
+    label: "Google Text Search (New API Basic)",
+    freeCap: 3000,
+  },
+  google_nearby_search_new: {
+    label: "Google Nearby Search (New API Basic)",
+    freeCap: 3000,
   },
 };
 

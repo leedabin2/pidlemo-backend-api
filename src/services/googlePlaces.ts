@@ -1,8 +1,9 @@
-import type { Coordinates } from "../types";
+import type { Coordinates, PlaceCategory } from "../types";
 import { recordQuotaUsage } from "./quotaTracker";
 import { logger } from "../utils/logger";
 
 const GOOGLE_KEY = process.env.GOOGLE_PLACES_API_KEY ?? "";
+const KAKAO_KEY = process.env.KAKAO_REST_API_KEY ?? "";
 // 정적 데이터는 짧게 캐시하고, 영업 여부는 periods로 매 요청 시각에 다시 계산
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const WEEK_MINUTES = 7 * 24 * 60;
@@ -34,6 +35,12 @@ export interface PlaceDetails {
   reviewCount: number | null;
   priceLevel: 0 | 1 | 2 | 3 | 4 | null;
   photoUrl: string | null;
+  resolvedName?: string;
+  resolvedAddress?: string;
+  resolvedPhone?: string | null;
+  types?: string[];
+  resolvedCoords?: Coordinates;
+  resolvedStructuredAddress?: StructuredAddress;
   hasParking?: boolean;
   parkingSummary?: string | null;
   goodForChildren?: boolean;
@@ -58,6 +65,15 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+interface ResolvedIdentity {
+  name?: string;
+  formattedAddress?: string;
+  phone?: string | null;
+  types?: string[];
+  coords?: Coordinates;
+  structuredAddress?: StructuredAddress;
+}
+
 export interface PlaceAtmosphereOptions {
   parking?: boolean;
   children?: boolean;
@@ -74,11 +90,24 @@ export interface PlaceAtmosphereDetails {
 }
 
 const cache = new Map<string, CacheEntry>();
+const kakaoAddressCache = new Map<string, { value: StructuredAddress | null; expiresAt: number }>();
+const atmosphereCache = new Map<string, { details: PlaceAtmosphereDetails; expiresAt: number }>();
+const atmosphereInFlight = new Map<string, Promise<PlaceAtmosphereDetails>>();
 const PRIMARY_MATCH_MAX_DISTANCE_METERS = 220;
-const STRIPPED_MATCH_MAX_DISTANCE_METERS = 120;
+
+// ── New Places API 후보 검색 ──────────────────────────────────────────
+const SEARCH_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.businessStatus";
+
+interface NewApiCandidate {
+  id: string;
+  displayName?: { text: string };
+  formattedAddress?: string;
+  location?: { latitude: number; longitude: number };
+  types?: string[];
+}
 
 interface FindPlaceCandidate {
-  place_id: string;
+  place_id?: string;
   name?: string;
   formatted_address?: string;
   geometry?: {
@@ -87,6 +116,46 @@ interface FindPlaceCandidate {
       lng: number;
     };
   };
+}
+
+interface ScoredCandidate {
+  id: string;
+  displayName: string;
+  baseScore: number;
+  distanceScore: number;
+  nameScore: number;
+  addressScore: number;
+  categoryScore: number;
+  distanceMeters: number;
+  formattedAddress?: string;
+  types?: string[];
+}
+
+interface MatchResolution {
+  placeId: string;
+  score: number;
+  candidateName: string;
+  details?: PlaceDetails;
+}
+
+interface StructuredAddress {
+  region1?: string;
+  region2?: string;
+  region3?: string;
+  roadName?: string;
+  mainBuildingNo?: string;
+  subBuildingNo?: string;
+  legalDong?: string;
+  lotMainNo?: string;
+  lotSubNo?: string;
+  buildingName?: string;
+  zoneNo?: string;
+}
+
+interface GoogleAddressComponent {
+  long_name?: string;
+  short_name?: string;
+  types?: string[];
 }
 
 function timeStringToMinutes(time: string): number {
@@ -257,6 +326,17 @@ function atmosphereFieldsMask(options: PlaceAtmosphereOptions): string | null {
   return fields.size > 0 ? [...fields].join(",") : null;
 }
 
+function hasAtmosphereFields(
+  details: PlaceAtmosphereDetails | undefined,
+  options: PlaceAtmosphereOptions,
+): boolean {
+  if (!details) return false;
+  if (options.parking && details.hasParking === undefined && details.parkingSummary === undefined) return false;
+  if (options.children && details.goodForChildren === undefined && details.menuForChildren === undefined && details.restroom === undefined) return false;
+  if (options.groups && details.goodForGroups === undefined) return false;
+  return true;
+}
+
 function formatParkingSummary(parkingOptions?: Record<string, boolean>): { hasParking?: boolean; parkingSummary?: string | null } {
   if (!parkingOptions) return {};
 
@@ -274,6 +354,178 @@ function formatParkingSummary(parkingOptions?: Record<string, boolean>): { hasPa
   };
 }
 
+function normalizeAddressPart(value?: string | null): string {
+  return (value ?? "").replace(/\s+/g, "").toLowerCase();
+}
+
+function coordCacheKey(coords: Coordinates): string {
+  return `${coords.lat.toFixed(5)},${coords.lng.toFixed(5)}`;
+}
+
+function parseStructuredAddressFromString(address?: string): StructuredAddress | null {
+  if (!address) return null;
+
+  const region1 = address.match(/(서울특별시|서울시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|세종특별자치시|경기도|강원특별자치도|충청북도|충청남도|전북특별자치도|전라남도|경상북도|경상남도|제주특별자치도)/)?.[1];
+  const region2 = address.match(/([가-힣]+(?:구|군|시))/)?.[1];
+  const region3 = address.match(/([가-힣0-9]+(?:동|읍|면|리))/)?.[1];
+  const road = address.match(/([가-힣0-9]+(?:로|길|대로))/)?.[1];
+  const roadNo = address.match(/(?:로|길|대로)\s*(\d+)(?:-(\d+))?/) ?? null;
+  const lot = address.match(/(?:동\s*)?(\d+)(?:-(\d+))?(?![0-9])/);
+
+  return {
+    region1,
+    region2,
+    region3,
+    roadName: road,
+    mainBuildingNo: roadNo?.[1],
+    subBuildingNo: roadNo?.[2],
+    legalDong: region3,
+    lotMainNo: !road ? lot?.[1] : undefined,
+    lotSubNo: !road ? lot?.[2] : undefined,
+  };
+}
+
+async function fetchKakaoStructuredAddress(coords: Coordinates, fallbackAddress?: string): Promise<StructuredAddress | null> {
+  const cacheKey = coordCacheKey(coords);
+  const cached = kakaoAddressCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+
+  let resolved: StructuredAddress | null = null;
+
+  if (KAKAO_KEY) {
+    try {
+      const url = `https://dapi.kakao.com/v2/local/geo/coord2address.json?x=${coords.lng}&y=${coords.lat}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `KakaoAK ${KAKAO_KEY}` },
+      });
+
+      if (res.ok) {
+        const json = await res.json() as {
+          documents?: Array<{
+            road_address?: {
+              region_1depth_name?: string;
+              region_2depth_name?: string;
+              region_3depth_name?: string;
+              road_name?: string;
+              main_building_no?: string;
+              sub_building_no?: string;
+              building_name?: string;
+              zone_no?: string;
+            };
+            address?: {
+              region_1depth_name?: string;
+              region_2depth_name?: string;
+              region_3depth_name?: string;
+              main_address_no?: string;
+              sub_address_no?: string;
+            };
+          }>;
+        };
+
+        const doc = json.documents?.[0];
+        if (doc) {
+          resolved = {
+            region1: doc.road_address?.region_1depth_name ?? doc.address?.region_1depth_name,
+            region2: doc.road_address?.region_2depth_name ?? doc.address?.region_2depth_name,
+            region3: doc.road_address?.region_3depth_name ?? doc.address?.region_3depth_name,
+            roadName: doc.road_address?.road_name,
+            mainBuildingNo: doc.road_address?.main_building_no,
+            subBuildingNo: doc.road_address?.sub_building_no,
+            legalDong: doc.address?.region_3depth_name,
+            lotMainNo: doc.address?.main_address_no,
+            lotSubNo: doc.address?.sub_address_no,
+            buildingName: doc.road_address?.building_name,
+            zoneNo: doc.road_address?.zone_no,
+          };
+        }
+      }
+    } catch (error) {
+      logger.warn("googlePlaces", "카카오 coord2address 실패", {
+        coords: cacheKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (!resolved && fallbackAddress) {
+    resolved = parseStructuredAddressFromString(fallbackAddress);
+  }
+
+  kakaoAddressCache.set(cacheKey, {
+    value: resolved,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+
+  return resolved;
+}
+
+function parseGoogleStructuredAddress(
+  components?: GoogleAddressComponent[],
+  fallbackAddress?: string,
+): StructuredAddress | null {
+  if (!components || components.length === 0) {
+    return parseStructuredAddressFromString(fallbackAddress);
+  }
+
+  const findAny = (...types: string[]) =>
+    components.find((component) => component.types?.some((type) => types.includes(type)));
+
+  return {
+    region1: findAny("administrative_area_level_1")?.long_name,
+    region2: findAny("administrative_area_level_2")?.long_name,
+    region3: findAny("sublocality_level_1", "administrative_area_level_3", "locality", "sublocality")?.long_name,
+    roadName: findAny("route")?.long_name,
+    mainBuildingNo: findAny("street_number")?.long_name,
+    legalDong: findAny("neighborhood", "sublocality_level_2", "sublocality_level_1")?.long_name,
+    buildingName: findAny("premise")?.long_name,
+    zoneNo: findAny("postal_code")?.long_name,
+  };
+}
+
+function compareStructuredAddress(
+  expected?: StructuredAddress | null,
+  candidate?: StructuredAddress | null,
+): number {
+  if (!expected || !candidate) return 0;
+
+  const expectedRoad = normalizeAddressPart(expected.roadName);
+  const candidateRoad = normalizeAddressPart(candidate.roadName);
+  const expectedBuildingNo = normalizeAddressPart(expected.mainBuildingNo);
+  const candidateBuildingNo = normalizeAddressPart(candidate.mainBuildingNo);
+
+  if (expectedRoad && candidateRoad && expectedRoad === candidateRoad) {
+    if (expectedBuildingNo && candidateBuildingNo && expectedBuildingNo === candidateBuildingNo) {
+      return 15;
+    }
+    return 12;
+  }
+
+  const expectedDong = normalizeAddressPart(expected.region3 ?? expected.legalDong);
+  const candidateDong = normalizeAddressPart(candidate.region3 ?? candidate.legalDong);
+  const expectedLotMain = normalizeAddressPart(expected.lotMainNo);
+  const candidateLotMain = normalizeAddressPart(candidate.lotMainNo);
+
+  if (expectedDong && candidateDong && expectedDong === candidateDong) {
+    if (expectedLotMain && candidateLotMain && expectedLotMain === candidateLotMain) {
+      return 12;
+    }
+    return 8;
+  }
+
+  const expectedRegion2 = normalizeAddressPart(expected.region2);
+  const candidateRegion2 = normalizeAddressPart(candidate.region2);
+  if (expectedRegion2 && candidateRegion2 && expectedRegion2 === candidateRegion2) return 3;
+
+  return 0;
+}
+
+function addressesStructuredLookCompatible(
+  expected?: StructuredAddress | null,
+  candidate?: StructuredAddress | null,
+): boolean {
+  return compareStructuredAddress(expected, candidate) >= 8;
+}
+
 // "플러스82프로젝트 양재점" → "플러스82프로젝트" (지점명 제거)
 function stripBranchSuffix(name: string): string {
   return name.replace(/\s*[가-힣A-Za-z0-9]+점$/, "").trim();
@@ -283,36 +535,81 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[^가-힣a-z0-9]/g, "");
 }
 
-function namesLookCompatible(expectedName: string, candidateName: string): "primary" | "stripped" | null {
-  const normalizedExpected = normalizeText(expectedName);
-  const normalizedCandidate = normalizeText(candidateName);
-  if (!normalizedExpected || !normalizedCandidate) return null;
-
-  if (
-    normalizedExpected === normalizedCandidate ||
-    normalizedCandidate.includes(normalizedExpected) ||
-    normalizedExpected.includes(normalizedCandidate)
-  ) {
-    return "primary";
-  }
-
-  const strippedExpected = normalizeText(stripBranchSuffix(expectedName));
-  if (
-    strippedExpected &&
-    strippedExpected !== normalizedExpected &&
-    (
-      strippedExpected === normalizedCandidate ||
-      normalizedCandidate.includes(strippedExpected) ||
-      strippedExpected.includes(normalizedCandidate)
-    )
-  ) {
-    return "stripped";
-  }
-
-  return null;
+function normalizePhone(value: string | undefined | null): string {
+  if (!value) return "";
+  let digits = value.replace(/\D/g, "");
+  if (digits.startsWith("82")) digits = `0${digits.slice(2)}`;
+  return digits;
 }
 
-// 구글이 광역시 단위만 반환한 경우 (구/동/로/길/번길 없음) → 주소 검증 불가
+function phonesLookCompatible(expectedPhone?: string, resolvedPhone?: string | null): boolean {
+  const expected = normalizePhone(expectedPhone);
+  const resolved = normalizePhone(resolvedPhone);
+  if (!expected || !resolved) return true;
+  if (expected === resolved) return true;
+  const suffixLen = Math.min(8, expected.length, resolved.length);
+  return expected.slice(-suffixLen) === resolved.slice(-suffixLen);
+}
+
+function calcPhoneScore(expectedPhone?: string, resolvedPhone?: string | null): number {
+  const expected = normalizePhone(expectedPhone);
+  const resolved = normalizePhone(resolvedPhone);
+  if (!expected || !resolved) return 0;
+  if (expected === resolved) return 15;
+  const suffixLen = Math.min(8, expected.length, resolved.length);
+  if (suffixLen >= 6 && expected.slice(-suffixLen) === resolved.slice(-suffixLen)) return 10;
+  return -20;
+}
+
+function categoryLooksLikeComplexOrBuilding(types: string[]): boolean {
+  return types.includes("shopping_mall") || types.includes("department_store") || types.includes("establishment");
+}
+
+function categoryTypeCompatible(expectedCategory: PlaceCategory | undefined, types: string[] | undefined): boolean {
+  if (!expectedCategory || !types || types.length === 0) return true;
+
+  const has = (...needles: string[]) => needles.some((needle) => types.includes(needle));
+
+  switch (expectedCategory) {
+    case "restaurant":
+      return has("restaurant", "meal_takeaway", "meal_delivery", "food");
+    case "cafe":
+      return has("cafe", "coffee_shop", "bakery", "food");
+    case "bar":
+      return has("bar", "pub", "restaurant", "food", "night_club");
+    case "mall":
+      return has("shopping_mall", "department_store", "store");
+    case "shopping":
+      return has("store", "shopping_mall", "department_store", "clothing_store", "home_goods_store", "book_store");
+    case "cinema":
+      return has("movie_theater");
+    case "park":
+      return has("park", "tourist_attraction");
+    case "nature":
+      return has("park", "tourist_attraction", "zoo", "botanical_garden", "campground");
+    case "exhibition":
+      return has("museum", "art_gallery", "tourist_attraction", "cultural_center");
+    case "photo":
+      return has("photographer", "photo_studio", "store");
+    case "activity":
+      return has("amusement_center", "bowling_alley", "gym", "tourist_attraction", "video_arcade", "sports_complex");
+    case "popup":
+      return has("event_venue", "art_gallery", "store", "tourist_attraction");
+    default:
+      return true;
+  }
+}
+
+function namesLookCompatible(expectedName: string, candidateName: string): boolean {
+  const normE = normalizeText(expectedName);
+  const normC = normalizeText(candidateName);
+  if (!normE || !normC) return false;
+  if (normC === normE || normC.includes(normE) || normE.includes(normC)) return true;
+  const stripped = normalizeText(stripBranchSuffix(expectedName));
+  if (stripped && stripped !== normE && (normC === stripped || normC.includes(stripped) || stripped.includes(normC))) return true;
+  return false;
+}
+
 function isBroadAddress(address: string): boolean {
   return !/[구동로길지번]/.test(address);
 }
@@ -324,7 +621,6 @@ function addressesLookCompatible(
 ): boolean {
   if (!expectedAddress || !candidateAddress) return true;
   if (distanceMeters <= 80) return true;
-  // 구글 주소가 너무 광범위하면 검증 스킵 — 거리(distance)로만 판단
   if (isBroadAddress(candidateAddress)) return true;
 
   const expectedTokens = expectedAddress
@@ -340,6 +636,446 @@ function addressesLookCompatible(
   return matched.length >= minMatches;
 }
 
+// ── New Places API 검색 ───────────────────────────────────────────────
+
+async function textSearchNewApi(query: string, center: Coordinates, radiusMeters: number): Promise<NewApiCandidate[]> {
+  recordQuotaUsage("google_text_search_new");
+  try {
+    const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_KEY,
+        "X-Goog-FieldMask": SEARCH_FIELD_MASK,
+      },
+      body: JSON.stringify({
+        textQuery: query,
+        languageCode: "ko",
+        regionCode: "KR",
+        locationBias: { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: radiusMeters } },
+        maxResultCount: 10,
+      }),
+    });
+    if (!res.ok) { logger.warn("googlePlaces", "Text Search 실패", { status: res.status }); return []; }
+    const json = await res.json() as { places?: NewApiCandidate[] };
+    return json.places ?? [];
+  } catch (err) {
+    logger.warn("googlePlaces", "Text Search 오류", { error: String(err) });
+    return [];
+  }
+}
+
+async function nearbySearchNewApi(center: Coordinates, radiusMeters: number, includedTypes: string[]): Promise<NewApiCandidate[]> {
+  recordQuotaUsage("google_nearby_search_new");
+  try {
+    const body: Record<string, unknown> = {
+      locationRestriction: { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: radiusMeters } },
+      maxResultCount: 10,
+      languageCode: "ko",
+    };
+    if (includedTypes.length > 0) body.includedTypes = includedTypes;
+
+    const res = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_KEY,
+        "X-Goog-FieldMask": SEARCH_FIELD_MASK,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { logger.warn("googlePlaces", "Nearby Search 실패", { status: res.status }); return []; }
+    const json = await res.json() as { places?: NewApiCandidate[] };
+    return json.places ?? [];
+  } catch (err) {
+    logger.warn("googlePlaces", "Nearby Search 오류", { error: String(err) });
+    return [];
+  }
+}
+
+// ── 매칭 점수 계산 (총 85점 만점: 거리45 + 이름20 + 주소15 + 카테고리5) ──
+
+function calcDistanceScore(loc: { latitude: number; longitude: number } | undefined, expected: Coordinates): number {
+  if (!loc) return 0;
+  const d = haversineDistanceMeters(expected, { lat: loc.latitude, lng: loc.longitude });
+  if (d <= 20)  return 45;
+  if (d <= 50)  return 38;
+  if (d <= 100) return 28;
+  if (d <= 200) return 15;
+  return 0;
+}
+
+function calcNameScore(candidateName: string | undefined, expectedName: string): number {
+  if (!candidateName) return 0;
+  const normC = normalizeText(candidateName);
+  const normE = normalizeText(expectedName);
+  if (!normC || !normE) return 0;
+
+  if (normC === normE || normC.includes(normE) || normE.includes(normC)) return 20;
+
+  const stripped = normalizeText(stripBranchSuffix(expectedName));
+  if (stripped && stripped !== normE && (normC === stripped || normC.includes(stripped) || stripped.includes(normC))) return 16;
+
+  const tokensC = normC.match(/[가-힣]{2,}|[a-z0-9]{2,}/g) ?? [];
+  const tokensE = normE.match(/[가-힣]{2,}|[a-z0-9]{2,}/g) ?? [];
+  if (tokensE.length === 0) return 0;
+  const ratio = tokensE.filter((t) => tokensC.some((c) => c.includes(t) || t.includes(c))).length / tokensE.length;
+  if (ratio >= 0.7) return 12;
+  if (ratio >= 0.4) return 6;
+  return 0;
+}
+
+function calcAddressScore(candidateAddr: string | undefined, expectedAddr: string | undefined): number {
+  if (!candidateAddr || !expectedAddr) return 0;
+
+  const roadMatch = expectedAddr.match(/([가-힣]+(?:로|길|대로))\s*(\d+)/);
+  if (roadMatch) {
+    const [, road, building] = roadMatch;
+    if (candidateAddr.includes(road) && candidateAddr.includes(building)) return 15;
+    if (candidateAddr.includes(road)) return 12;
+  }
+
+  const jiMatch = expectedAddr.match(/([가-힣]+동)\s*(\d+)/);
+  if (jiMatch) {
+    const [, dong, bon] = jiMatch;
+    if (candidateAddr.includes(dong) && candidateAddr.includes(bon)) return 12;
+    if (candidateAddr.includes(dong)) return 8;
+  }
+
+  const guMatch = expectedAddr.match(/([가-힣]+구)/);
+  if (guMatch && candidateAddr.includes(guMatch[1])) return 3;
+  return 0;
+}
+
+function calcCategoryScore(types: string[] | undefined, category: PlaceCategory | undefined): number {
+  if (!types || !category) return 0;
+  if (categoryTypeCompatible(category, types)) return 5;
+
+  const isFood = types.some((t) => ["restaurant", "cafe", "food", "bar", "bakery"].includes(t));
+  const isCulture = types.some((t) => ["museum", "art_gallery", "tourist_attraction"].includes(t));
+  const isShop = types.some((t) => ["store", "shopping_mall", "department_store"].includes(t));
+  if (isFood && ["restaurant", "cafe", "bar"].includes(category)) return 3;
+  if (isCulture && ["exhibition", "park", "nature"].includes(category)) return 3;
+  if (isShop && ["shopping", "mall", "popup"].includes(category)) return 3;
+  return 0;
+}
+
+function googleTypesForCategory(category?: PlaceCategory): string[] {
+  const map: Partial<Record<PlaceCategory, string[]>> = {
+    restaurant: ["restaurant"], cafe: ["cafe"], bar: ["bar"],
+    mall: ["shopping_mall"], shopping: ["store"], cinema: ["movie_theater"],
+    park: ["park"], nature: ["park"], exhibition: ["museum", "art_gallery"],
+    photo: ["store"], activity: ["amusement_center"], popup: ["store"],
+  };
+  return (category && map[category]) ? map[category]! : [];
+}
+
+async function findPlaceIdScored(
+  name: string,
+  coords: Coordinates,
+  address?: string,
+  expectedCategory?: PlaceCategory,
+): Promise<ScoredCandidate[]> {
+  if (!GOOGLE_KEY) return [];
+
+  // 1차: 이름+주소 Text Search, 100m locationBias
+  const query = address ? `${name} ${address}` : name;
+  let candidates = await textSearchNewApi(query, coords, 100);
+
+  // 후보 부족 시 이름만으로 200m 확장
+  if (candidates.length < 2) {
+    const more = await textSearchNewApi(name, coords, 200);
+    const seen = new Set(candidates.map((c) => c.id));
+    candidates = [...candidates, ...more.filter((c) => !seen.has(c.id))];
+  }
+
+  // 2차: Nearby Search fallback
+  if (candidates.length === 0) {
+    candidates = await nearbySearchNewApi(coords, 150, googleTypesForCategory(expectedCategory));
+  }
+
+  if (candidates.length === 0) {
+    logger.warn("googlePlaces", "place_id를 찾지 못함 (후보 없음)", { name });
+    return [];
+  }
+
+  const scored = candidates
+    .map((c) => ({
+      id: c.id,
+      displayName: c.displayName?.text ?? "",
+      distanceScore: calcDistanceScore(c.location, coords),
+      nameScore: calcNameScore(c.displayName?.text, name),
+      addressScore: calcAddressScore(c.formattedAddress, address),
+      categoryScore: calcCategoryScore(c.types, expectedCategory),
+      distanceMeters: c.location
+        ? haversineDistanceMeters(coords, { lat: c.location.latitude, lng: c.location.longitude })
+        : Infinity,
+      formattedAddress: c.formattedAddress,
+      types: c.types,
+    }))
+    .map((c) => ({
+      ...c,
+      baseScore: c.distanceScore + c.nameScore + c.addressScore + c.categoryScore,
+    }))
+    .sort((a, b) => b.baseScore - a.baseScore);
+
+  logger.info("googlePlaces", "매칭 점수", {
+    name,
+    top: scored
+      .slice(0, 5)
+      .map((s) => `${s.displayName}(${s.baseScore}점/${Math.round(s.distanceMeters)}m)`)
+      .join(" | "),
+  });
+  return scored;
+}
+
+function candidateLooksTooBroad(
+  details: PlaceDetails,
+  expectedName: string,
+  expectedCategory?: PlaceCategory,
+): boolean {
+  if (!details.types || expectedCategory === "mall") return false;
+  if (!categoryLooksLikeComplexOrBuilding(details.types)) return false;
+
+  const resolvedName = details.resolvedName ?? "";
+  const normalizedResolved = normalizeText(resolvedName);
+  const normalizedExpected = normalizeText(expectedName);
+  const strippedExpected = normalizeText(stripBranchSuffix(expectedName));
+
+  if (!normalizedResolved) return false;
+  if (normalizedResolved === normalizedExpected || normalizedResolved === strippedExpected) return false;
+
+  return true;
+}
+
+function calcResolutionScore(
+  candidate: ScoredCandidate,
+  details: PlaceDetails,
+  expectedName: string,
+  coords: Coordinates,
+  expectedAddress: string | undefined,
+  expectedStructuredAddress: StructuredAddress | null,
+  expectedPhone: string | undefined,
+  expectedCategory: PlaceCategory | undefined,
+): number {
+  let score = candidate.baseScore;
+
+  const structuredAddressScore = compareStructuredAddress(
+    expectedStructuredAddress,
+    details.resolvedStructuredAddress,
+  );
+  if (structuredAddressScore > 0) {
+    score += Math.max(0, structuredAddressScore - candidate.addressScore);
+  } else {
+    const resolvedAddressScore = calcAddressScore(details.resolvedAddress, expectedAddress);
+    score += Math.max(0, resolvedAddressScore - candidate.addressScore);
+  }
+
+  const resolvedCategoryScore = calcCategoryScore(details.types, expectedCategory);
+  score += Math.max(0, resolvedCategoryScore - candidate.categoryScore);
+
+  score += calcPhoneScore(expectedPhone, details.resolvedPhone);
+
+  if (!phonesLookCompatible(expectedPhone, details.resolvedPhone)) {
+    score -= 10;
+  }
+
+  if (details.resolvedCoords) {
+    const exactDistance = haversineDistanceMeters(coords, details.resolvedCoords);
+    if (exactDistance > PRIMARY_MATCH_MAX_DISTANCE_METERS) score -= 30;
+    else if (exactDistance > 120) score -= 10;
+  }
+
+  if (!categoryTypeCompatible(expectedCategory, details.types)) {
+    score -= 10;
+  }
+
+  if (candidateLooksTooBroad(details, expectedName, expectedCategory)) {
+    score -= 15;
+  }
+
+  return score;
+}
+
+async function resolvePlaceMatch(
+  name: string,
+  coords: Coordinates,
+  address?: string,
+  phone?: string,
+  expectedCategory?: PlaceCategory,
+): Promise<MatchResolution | null> {
+  const kakaoStructuredAddress = await fetchKakaoStructuredAddress(coords, address);
+  const scoredCandidates = await findPlaceIdScored(name, coords, address, expectedCategory);
+  let hadNewApiCandidates = scoredCandidates.length > 0;
+
+  if (scoredCandidates.length > 0) {
+    const topCandidates = scoredCandidates.slice(0, 3);
+    const evaluated: Array<MatchResolution & { valid: boolean }> = [];
+
+    for (const candidate of topCandidates) {
+      const details = await fetchPlaceDetails(candidate.id);
+      const valid = validateResolvedIdentity(name, coords, address, kakaoStructuredAddress, phone, expectedCategory, {
+        name: details.resolvedName,
+        formattedAddress: details.resolvedAddress,
+        phone: details.resolvedPhone,
+        types: details.types,
+        coords: details.resolvedCoords,
+        structuredAddress: details.resolvedStructuredAddress,
+      });
+      const score = calcResolutionScore(
+        candidate,
+        details,
+        name,
+        coords,
+        address,
+        kakaoStructuredAddress,
+        phone,
+        expectedCategory,
+      );
+
+      evaluated.push({
+        placeId: candidate.id,
+        score,
+        candidateName: details.resolvedName ?? candidate.displayName,
+        details,
+        valid,
+      });
+    }
+
+    evaluated.sort((a, b) => b.score - a.score);
+    const bestValid = evaluated.find((item) => item.valid);
+
+    logger.info("googlePlaces", "후보 추가 검증", {
+      name,
+      top: evaluated
+        .map((item) => `${item.candidateName}(${item.score}점${item.valid ? "" : "/invalid"})`)
+        .join(" | "),
+    });
+
+    if (bestValid?.score && bestValid.score >= 90) {
+      logger.info("googlePlaces", "자동 매칭 성공", {
+        name,
+        matched: bestValid.candidateName,
+        score: bestValid.score,
+      });
+      return bestValid;
+    }
+
+    if (bestValid?.score && bestValid.score >= 75) {
+      logger.warn("googlePlaces", "조건부 매칭 (75~89점)", {
+        name,
+        matched: bestValid.candidateName,
+        score: bestValid.score,
+      });
+      return bestValid;
+    }
+
+    logger.warn("googlePlaces", "점수 기반 매칭 실패 (<75점)", {
+      name,
+      best: bestValid ? `${bestValid.candidateName}(${bestValid.score}점)` : "none",
+    });
+  }
+
+  if (hadNewApiCandidates) {
+    logger.warn("googlePlaces", "legacy fallback 생략", {
+      name,
+      reason: "New API 후보는 있었지만 점수 기준 미달",
+    });
+    return null;
+  }
+
+  const fallbackId = await findPlaceId(name, coords, address, phone);
+  if (!fallbackId) return null;
+  const fallbackDetails = await fetchPlaceDetails(fallbackId);
+  if (!validateResolvedIdentity(name, coords, address, kakaoStructuredAddress, phone, expectedCategory, {
+    name: fallbackDetails.resolvedName,
+    formattedAddress: fallbackDetails.resolvedAddress,
+    phone: fallbackDetails.resolvedPhone,
+    types: fallbackDetails.types,
+    coords: fallbackDetails.resolvedCoords,
+    structuredAddress: fallbackDetails.resolvedStructuredAddress,
+  })) {
+    logger.warn("googlePlaces", "legacy fallback 검증 실패", { name, placeId: fallbackId });
+    return null;
+  }
+
+  logger.warn("googlePlaces", "legacy fallback 매칭 사용", {
+    name,
+    matched: fallbackDetails.resolvedName ?? fallbackId,
+  });
+  return {
+    placeId: fallbackId,
+    score: 0,
+    candidateName: fallbackDetails.resolvedName ?? fallbackId,
+    details: fallbackDetails,
+  };
+}
+
+function validateResolvedIdentity(
+  expectedName: string,
+  coords: Coordinates,
+  expectedAddress: string | undefined,
+  expectedStructuredAddress: StructuredAddress | null,
+  expectedPhone: string | undefined,
+  expectedCategory: PlaceCategory | undefined,
+  resolved: ResolvedIdentity,
+): boolean {
+  if (!resolved.name) return false;
+  if (!namesLookCompatible(expectedName, resolved.name)) return false;
+
+  if (!phonesLookCompatible(expectedPhone, resolved.phone)) {
+    logger.info("googlePlaces", "후보 제외: 전화번호 불일치", {
+      expected: expectedName,
+      expectedPhone,
+      resolvedPhone: resolved.phone ?? "-",
+    });
+    return false;
+  }
+  if (resolved.coords) {
+    const distanceMeters = haversineDistanceMeters(coords, resolved.coords);
+    if (distanceMeters > PRIMARY_MATCH_MAX_DISTANCE_METERS) {
+      logger.info("googlePlaces", "후보 제외: 상세 좌표 불일치", {
+        expected: expectedName,
+        resolved: resolved.name,
+        distance: `${Math.round(distanceMeters)}m`,
+      });
+      return false;
+    }
+    const structuredCompatible = addressesStructuredLookCompatible(
+      expectedStructuredAddress,
+      resolved.structuredAddress,
+    );
+    if (
+      !structuredCompatible &&
+      !addressesLookCompatible(expectedAddress, resolved.formattedAddress, distanceMeters)
+    ) {
+      logger.info("googlePlaces", "후보 제외: 상세 주소 불일치", {
+        expected: expectedName,
+        expectedAddress,
+        resolvedAddress: resolved.formattedAddress ?? "-",
+      });
+      return false;
+    }
+  }
+  if (!categoryTypeCompatible(expectedCategory, resolved.types)) {
+    logger.info("googlePlaces", "후보 제외: 상세 타입 불일치", {
+      expected: expectedName,
+      category: expectedCategory,
+      types: resolved.types?.join(",") ?? "-",
+    });
+    return false;
+  }
+  if (expectedCategory && expectedCategory !== "mall" && categoryLooksLikeComplexOrBuilding(resolved.types ?? []) && !categoryTypeCompatible(expectedCategory, resolved.types)) {
+    logger.info("googlePlaces", "후보 제외: 복합몰/건물 POI로 판단", {
+      expected: expectedName,
+      category: expectedCategory,
+      types: resolved.types?.join(",") ?? "-",
+    });
+    return false;
+  }
+  return true;
+}
+
 function isValidCandidate(
   candidate: FindPlaceCandidate,
   expectedName: string,
@@ -348,16 +1084,13 @@ function isValidCandidate(
 ): boolean {
   if (!candidate.name || !candidate.geometry?.location) return false;
 
-  const matchType = namesLookCompatible(expectedName, candidate.name);
-  if (!matchType) return false;
+  if (!namesLookCompatible(expectedName, candidate.name)) return false;
 
   const distanceMeters = haversineDistanceMeters(coords, {
     lat: candidate.geometry.location.lat,
     lng: candidate.geometry.location.lng,
   });
-  const maxDistance =
-    matchType === "primary" ? PRIMARY_MATCH_MAX_DISTANCE_METERS : STRIPPED_MATCH_MAX_DISTANCE_METERS;
-  if (distanceMeters > maxDistance) {
+  if (distanceMeters > PRIMARY_MATCH_MAX_DISTANCE_METERS) {
     logger.info("googlePlaces", "후보 제외: 거리 불일치", {
       candidate: candidate.name,
       expected: expectedName,
@@ -488,6 +1221,13 @@ async function findPlaceId(
 
 async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
   const fields = [
+    "name",
+    "formatted_address",
+    "address_component",
+    "formatted_phone_number",
+    "international_phone_number",
+    "geometry",
+    "types",
     "opening_hours",
     "rating",
     "user_ratings_total",
@@ -500,6 +1240,13 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
   const res = await fetch(url);
   const json = await res.json() as {
     result?: {
+      name?: string;
+      formatted_address?: string;
+      address_components?: GoogleAddressComponent[];
+      formatted_phone_number?: string;
+      international_phone_number?: string;
+      geometry?: { location?: { lat: number; lng: number } };
+      types?: string[];
       opening_hours?: { open_now: boolean; periods: Period[] };
       rating?: number;
       user_ratings_total?: number;
@@ -529,6 +1276,15 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
     reviewCount: result.user_ratings_total ?? null,
     priceLevel: (result.price_level as 0 | 1 | 2 | 3 | 4 | undefined) ?? null,
     photoUrl,
+    resolvedName: result.name,
+    resolvedAddress: result.formatted_address,
+    resolvedPhone: result.international_phone_number ?? result.formatted_phone_number ?? null,
+    types: result.types ?? [],
+    resolvedCoords: result.geometry?.location ? {
+      lat: result.geometry.location.lat,
+      lng: result.geometry.location.lng,
+    } : undefined,
+    resolvedStructuredAddress: parseGoogleStructuredAddress(result.address_components, result.formatted_address) ?? undefined,
   };
 }
 
@@ -590,7 +1346,8 @@ export async function getPlaceDetails(
   name: string,
   coords: Coordinates,
   address?: string,
-  phone?: string
+  phone?: string,
+  expectedCategory?: PlaceCategory,
 ): Promise<PlaceDetails | null> {
   if (!GOOGLE_KEY) return null;
 
@@ -599,13 +1356,14 @@ export async function getPlaceDetails(
   if (cached && Date.now() < cached.expiresAt) return detailsFromCache(cached);
 
   try {
-    const placeId = await findPlaceId(name, coords, address, phone);
-    if (!placeId) {
+    const match = await resolvePlaceMatch(name, coords, address, phone, expectedCategory);
+    if (!match) {
       logger.warn("googlePlaces", "검증 가능한 place_id를 찾지 못함", { name });
       return null;
     }
 
-    const details = await fetchPlaceDetails(placeId);
+    const placeId = match.placeId;
+    const details = match.details ?? await fetchPlaceDetails(placeId);
     cache.set(key, {
       placeId,
       rating: details.rating,
@@ -642,7 +1400,8 @@ export async function getPlaceAtmosphere(
   coords: Coordinates,
   options: PlaceAtmosphereOptions,
   address?: string,
-  phone?: string
+  phone?: string,
+  expectedCategory?: PlaceCategory,
 ): Promise<PlaceAtmosphereDetails | null> {
   if (!GOOGLE_KEY) return null;
 
@@ -664,7 +1423,7 @@ export async function getPlaceAtmosphere(
     ].filter(Boolean).join(" + ");
     logger.info("placesNew", "♻️ 캐시 HIT", {
       name,
-      intent: intentBadges || "기본",
+      requestKind: intentBadges || "기본",
       parking: cached.hasParking,
       goodForChildren: cached.goodForChildren,
       goodForGroups: cached.goodForGroups,
@@ -680,10 +1439,31 @@ export async function getPlaceAtmosphere(
   }
 
   try {
-    const placeId = cached?.placeId ?? await findPlaceId(name, coords, address, phone);
+    const match = cached?.placeId
+      ? { placeId: cached.placeId, details: undefined }
+      : await resolvePlaceMatch(name, coords, address, phone, expectedCategory);
+    const placeId = match?.placeId ?? null;
     if (!placeId) {
       logger.warn("googlePlaces", "atmosphere 조회용 place_id를 찾지 못함", { name });
       return null;
+    }
+
+    if (!cached?.placeId && match?.details) {
+      cache.set(key, {
+        placeId,
+        rating: cached?.rating ?? match.details.rating ?? null,
+        reviewCount: cached?.reviewCount ?? match.details.reviewCount ?? null,
+        priceLevel: cached?.priceLevel ?? match.details.priceLevel ?? null,
+        photoUrl: cached?.photoUrl ?? match.details.photoUrl ?? null,
+        periods: cached?.periods ?? match.details.hours?.periods ?? [],
+        hasParking: cached?.hasParking,
+        parkingSummary: cached?.parkingSummary ?? null,
+        goodForChildren: cached?.goodForChildren,
+        menuForChildren: cached?.menuForChildren,
+        goodForGroups: cached?.goodForGroups,
+        restroom: cached?.restroom,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
     }
 
     const intentBadges = [
@@ -694,10 +1474,55 @@ export async function getPlaceAtmosphere(
     logger.info("placesNew", "조회 시작", {
       name,
       placeId,
-      intent: intentBadges || "기본",
+      requestKind: intentBadges || "기본",
     });
 
-    const atmosphere = await fetchPlaceAtmosphere(placeId, options);
+    const placeScopedKey = `${placeId}|${fieldMask}`;
+    const placeScopedCached = atmosphereCache.get(placeScopedKey);
+    if (placeScopedCached && Date.now() < placeScopedCached.expiresAt && hasAtmosphereFields(placeScopedCached.details, options)) {
+      logger.info("placesNew", "♻️ placeId 캐시 HIT", {
+        name,
+        placeId,
+        requestKind: intentBadges || "기본",
+      });
+      const mergedCache: CacheEntry = {
+        placeId,
+        rating: cached?.rating ?? null,
+        reviewCount: cached?.reviewCount ?? null,
+        priceLevel: cached?.priceLevel ?? null,
+        photoUrl: cached?.photoUrl ?? null,
+        periods: cached?.periods ?? [],
+        hasParking: placeScopedCached.details.hasParking ?? cached?.hasParking,
+        parkingSummary: placeScopedCached.details.parkingSummary ?? cached?.parkingSummary ?? null,
+        goodForChildren: placeScopedCached.details.goodForChildren ?? cached?.goodForChildren,
+        menuForChildren: placeScopedCached.details.menuForChildren ?? cached?.menuForChildren,
+        goodForGroups: placeScopedCached.details.goodForGroups ?? cached?.goodForGroups,
+        restroom: placeScopedCached.details.restroom ?? cached?.restroom,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      };
+      cache.set(key, mergedCache);
+      return placeScopedCached.details;
+    }
+
+    let atmospherePromise = atmosphereInFlight.get(placeScopedKey);
+    if (!atmospherePromise) {
+      atmospherePromise = fetchPlaceAtmosphere(placeId, options).finally(() => {
+        atmosphereInFlight.delete(placeScopedKey);
+      });
+      atmosphereInFlight.set(placeScopedKey, atmospherePromise);
+    } else {
+      logger.info("placesNew", "⏳ 동일 placeId 조회 재사용", {
+        name,
+        placeId,
+        requestKind: intentBadges || "기본",
+      });
+    }
+
+    const atmosphere = await atmospherePromise;
+    atmosphereCache.set(placeScopedKey, {
+      details: atmosphere,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
     const nextCache: CacheEntry = {
       placeId,
       rating: cached?.rating ?? null,
@@ -716,7 +1541,7 @@ export async function getPlaceAtmosphere(
     cache.set(key, nextCache);
     logger.info("placesNew", "✅ Places API (New) 보강 완료", {
       name,
-      intent: intentBadges || "기본",
+      requestKind: intentBadges || "기본",
       parking: atmosphere.hasParking,
       parkingSummary: atmosphere.parkingSummary ?? "-",
       goodForChildren: atmosphere.goodForChildren,

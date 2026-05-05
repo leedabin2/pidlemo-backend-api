@@ -35,14 +35,14 @@ export function weatherScore(category: Place["category"], condition: WeatherCond
 
 function timeScore(category: Place["category"], slot: TimeSlot): number {
   const table: Record<Place["category"], Record<TimeSlot, number>> = {
-    cafe:       { dawn: 2,  morning: 20, lunch: 12, afternoon: 20, evening: 12, night: 8  },
-    restaurant: { dawn: 0,  morning: 5,  lunch: 22, afternoon: 14, evening: 22, night: 16 },
+    cafe:       { dawn: 8,  morning: 20, lunch: 12, afternoon: 20, evening: 12, night: 8  },
+    restaurant: { dawn: 0,  morning: 10, lunch: 22, afternoon: 14, evening: 22, night: 16 },
     popup:      { dawn: 0,  morning: 20, lunch: 22, afternoon: 24, evening: 22, night: 10 },
     exhibition: { dawn: 0,  morning: 20, lunch: 22, afternoon: 24, evening: 20, night: 6  },
     park:       { dawn: 20, morning: 18, lunch: 14, afternoon: 20, evening: 16, night: 5  },
     shopping:   { dawn: 0,  morning: 10, lunch: 14, afternoon: 22, evening: 18, night: 10 },
     mall:       { dawn: 0,  morning: 12, lunch: 18, afternoon: 24, evening: 20, night: 12 },
-    bar:        { dawn: 5,  morning: 0,  lunch: 0,  afternoon: 5,  evening: 22, night: 30 },
+    bar:        { dawn: 12, morning: 0,  lunch: 0,  afternoon: 5,  evening: 22, night: 30 },
     photo:      { dawn: 0,  morning: 14, lunch: 18, afternoon: 22, evening: 20, night: 14 },
     nature:     { dawn: 18, morning: 22, lunch: 16, afternoon: 18, evening: 14, night: 2  },
     cinema:     { dawn: 0,  morning: 10, lunch: 14, afternoon: 22, evening: 20, night: 18 },
@@ -98,6 +98,7 @@ export function companionScore(
 function companionPlaceHeuristicScore(place: Place, companion: CompanionPreference, slot: TimeSlot): number {
   if (companion === "상관없음") return 0;
   let score = 0;
+  const haystack = `${place.name} ${place.subCategory ?? ""} ${place.tags.join(" ")}`;
 
   if (companion === "데이트") {
     if (place.category === "cinema" && (slot === "afternoon" || slot === "evening" || slot === "night")) score += 8;
@@ -118,9 +119,15 @@ function companionPlaceHeuristicScore(place: Place, companion: CompanionPreferen
 
   if (companion === "아이와 함께" || companion === "가족과") {
     if (place.category === "mall") score += 10;
-    if (place.goodForChildren) score += 8;
-    if (place.menuForChildren) score += 4;
-    if (place.restroom) score += 2;
+    if (place.goodForChildren === true) score += 8;
+    if (place.goodForChildren === false) score -= 20;
+    if (place.menuForChildren === true) score += 4;
+    if (place.restroom === true) score += 2;
+    if (place.restroom === false) score -= 10;
+    if (place.category === "activity" && /(홀덤|포커|오락실|방탈출|보드게임|보드카페|만화방|만화카페|VR|멀티방)/.test(haystack)) {
+      score -= 40;
+    }
+    if (place.category === "bar") score -= 40;
   }
 
   return score;
@@ -208,6 +215,15 @@ export function scorePlace(place: Place, ctx: ScoreContext): number {
   const isDawn = ctx.hourOfDay >= 0 && ctx.hourOfDay < 6;
   if (isLateNight && place.isOpen === null) score -= 35;
   if (isDawn && place.isOpen === true) score += 15;
+
+  // 2차 필터: atmosphere 데이터가 있는 장소에만 작동 (undefined = 중립)
+  const prefs = ctx.preferences;
+  if (prefs.requireParking && place.hasParking === false) score -= 50;
+  if (prefs.requireRestroom && place.restroom === false) score -= 35;
+  if (prefs.requireChildFacilities) {
+    if (place.goodForChildren === false && place.menuForChildren === false) score -= 40;
+    else if (place.goodForChildren === false) score -= 20;
+  }
 
   return Math.round(score);
 }

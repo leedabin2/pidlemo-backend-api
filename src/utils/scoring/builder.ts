@@ -225,11 +225,32 @@ function hasSamePlaces(a: Place[], b: Place[]): boolean {
   return b.every((p) => ids.has(p.id));
 }
 
-function pickDiversePlaces(places: Place[], count: number): Place[] {
+function isFallbackAllowed(place: Place, options: NormalizedOptions, slot: ReturnType<typeof getTimeSlot>): boolean {
+  if (options.companion === "아이와 함께") {
+    if (place.category === "bar" || place.category === "shopping") return false;
+    if ((slot === "night" || slot === "dawn") && (place.category === "park" || place.category === "nature")) return false;
+  }
+  if (options.companion === "가족과") {
+    if (place.category === "bar" || place.category === "shopping") return false;
+    if (slot === "night" && (place.category === "park" || place.category === "nature")) return false;
+  }
+  if (options.companion === "직장모임") {
+    if (place.category === "shopping") return false;
+  }
+  return true;
+}
+
+function pickDiversePlaces(
+  places: Place[],
+  count: number,
+  options: NormalizedOptions,
+  slot: ReturnType<typeof getTimeSlot>,
+): Place[] {
   const result: Place[] = [];
   const seenCategories = new Set<string>();
   for (const place of places) {
     if (result.length >= count) break;
+    if (!isFallbackAllowed(place, options, slot)) continue;
     if (seenCategories.has(place.category)) continue;
     result.push(place);
     seenCategories.add(place.category);
@@ -286,9 +307,17 @@ export function buildCourses(
   const condition = getWeatherCondition(weather, normalized.weatherAware);
   const slot = getTimeSlot(hour);
   const sorted = [...scoredPlaces].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const primaryTemplates = normalized.companion === "상관없음"
+    ? [
+      ...buildFeaturedTemplates(slot, condition),
+      ...buildCompanionTemplates(slot, normalized, condition),
+    ]
+    : [
+      ...buildCompanionTemplates(slot, normalized, condition),
+      ...buildFeaturedTemplates(slot, condition),
+    ];
   const templates = dedupeTemplates([
-    ...buildFeaturedTemplates(slot, condition),
-    ...buildCompanionTemplates(slot, normalized, condition),
+    ...primaryTemplates,
     ...BASE_TEMPLATES[slot],
     ...buildConditionTemplates(slot, condition),
     ...buildFocusTemplates(slot, normalized),
@@ -325,6 +354,7 @@ export function buildCourses(
 
     existingTitles.add(title);
     usedIntents.add(resolvedIntent);
+    for (const blocked of template.blocksIntents ?? []) usedIntents.add(blocked);
     for (const place of places) usedPlaceIdsAcrossCourses.add(place.id);
     if (courses.length >= 5) break;
   }
@@ -336,6 +366,8 @@ export function buildCourses(
     const fallbackPlaces = pickDiversePlaces(
       sorted.filter((p) => !usedIds.has(p.id) && p.isOpen !== false),
       fallbackCount,
+      normalized,
+      slot,
     );
     if (fallbackPlaces.length < 2) break;
 

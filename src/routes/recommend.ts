@@ -49,6 +49,10 @@ function parseCompanion(value: unknown): RecommendationOptions["companion"] {
   return "상관없음";
 }
 
+function parseBoolFlag(value: unknown): boolean {
+  return value === "true" || value === "1";
+}
+
 function mergeUniqueTags(tags: string[]): string[] {
   return [...new Set(tags)];
 }
@@ -90,7 +94,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
   return Promise.all(
     places.map(async (place) => {
       try {
-        const details = await getPlaceDetails(place.name, place.coordinates, place.address, place.phone);
+        const details = await getPlaceDetails(place.name, place.coordinates, place.address, place.phone, place.category);
         if (!details) return place;
 
         const { hours, rating, reviewCount, priceLevel, photoUrl } = details;
@@ -123,32 +127,160 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
 function shouldFetchAtmosphere(options: RecommendationOptions) {
   return (
     options.transport === "차량" ||
+    options.requireParking === true ||
     options.companion === "아이와 함께" ||
-    options.companion === "가족과" ||
+    options.requireChildFacilities === true ||
+    options.requireRestroom === true ||
     options.companion === "직장모임"
   );
+}
+
+const coordKey = (p: Place) => `${p.coordinates.lat.toFixed(3)}_${p.coordinates.lng.toFixed(3)}`;
+
+function isChildFriendlyActivity(place: Place): boolean {
+  const haystack = `${place.name} ${place.subCategory ?? ""} ${place.tags.join(" ")}`;
+  if (/(홀덤|포커|오락실|방탈출|보드게임|보드카페|만화방|만화카페|VR|멀티방)/.test(haystack)) return false;
+  return /(키즈|어린이|유아|패밀리|가족|체험)/.test(haystack) || place.goodForChildren === true;
+}
+
+function isChildFriendlyAtmosphereCandidate(place: Place): boolean {
+  const haystack = `${place.name} ${place.subCategory ?? ""} ${place.tags.join(" ")}`;
+  if (/(홀덤|포커|이자카야|바|주점|포차)/.test(haystack)) return false;
+  if (place.category === "activity" && !isChildFriendlyActivity(place)) return false;
+  return true;
+}
+
+function companionGuardrailReason(
+  place: Place,
+  options: RecommendationOptions,
+): string | null {
+  const companion = options.companion ?? "상관없음";
+  const haystack = `${place.name} ${place.subCategory ?? ""} ${place.tags.join(" ")}`;
+
+  if (companion === "아이와 함께") {
+    if (place.category === "bar") return "아이동반: bar 제외";
+    if (place.category === "shopping") return "아이동반: 감성 소품샵 제외";
+    if (place.category === "activity" && !isChildFriendlyActivity(place)) {
+      return `아이동반: 부적합 activity 제외(${place.subCategory ?? place.name})`;
+    }
+    if (/(홀덤|포커|카지노|주점|포차|이자카야)/.test(haystack)) return "아이동반: 유흥/성인향 제외";
+  }
+
+  if (companion === "가족과") {
+    if (place.category === "bar") return "가족과: bar 제외";
+    if (place.category === "shopping") return "가족과: 감성 소품샵 제외";
+    if (place.category === "activity" && /(홀덤|포커|오락실|방탈출|보드게임|보드카페|만화방|만화카페|VR|멀티방)/.test(haystack)) {
+      return `가족과: 부적합 activity 제외(${place.subCategory ?? place.name})`;
+    }
+  }
+
+  if (companion === "직장모임") {
+    if (place.category === "shopping") return "직장모임: 감성 소품샵 제외";
+  }
+
+  return null;
+}
+
+function applyCompanionGuardrails(
+  places: Place[],
+  options: RecommendationOptions,
+): Place[] {
+  if (!options.companion || options.companion === "상관없음") return places;
+
+  const kept: Place[] = [];
+  const excluded: string[] = [];
+
+  for (const place of places) {
+    const reason = companionGuardrailReason(place, options);
+    if (reason) {
+      excluded.push(`${place.name}(${place.category}) - ${reason}`);
+      continue;
+    }
+    kept.push(place);
+  }
+
+  if (excluded.length > 0) {
+    logger.list("recommend", `동반자 가드레일 제외 ${excluded.length}개`, excluded, 20);
+  }
+
+  return kept;
+}
+
+function applyChildCategoryDefaults(places: Place[]): Place[] {
+  const defaulted: string[] = [];
+  const result = places.map((p) => {
+    if (p.goodForChildren !== undefined) return p;
+    if (["mall", "park", "cinema", "nature"].includes(p.category)) {
+      defaulted.push(`${p.name}(${p.category})`);
+      return { ...p, goodForChildren: true };
+    }
+    return p;
+  });
+  if (defaulted.length > 0) {
+    logger.list("recommend", `🧒 카테고리 기본값 → goodForChildren=true ${defaulted.length}개`, defaulted, 20);
+  }
+  return result;
 }
 
 function pickAtmosphereTargets(places: Place[], options: RecommendationOptions): Place[] {
   const picked: Place[] = [];
   const seen = new Set<string>();
   const byStage = [...places].sort((a, b) => candidateStageScore(b) - candidateStageScore(a));
+  const seenCoords = new Set<string>();
 
+  const priorityFor = (category: Place["category"]): number => {
+    if (options.companion === "아이와 함께") {
+      return ["mall", "activity", "cinema", "park", "exhibition", "restaurant", "cafe"].indexOf(category);
+    }
+    if (options.companion === "직장모임") {
+      return ["restaurant", "bar", "cafe", "mall"].indexOf(category);
+    }
+    if (options.transport === "차량") {
+      return ["mall", "restaurant", "cinema", "activity", "cafe", "shopping"].indexOf(category);
+    }
+    return 0;
+  };
+
+  const sortByAtmospherePriority = (source: Place[]) =>
+    [...source].sort((a, b) => {
+      const aPriority = priorityFor(a.category);
+      const bPriority = priorityFor(b.category);
+      const normalizedAPriority = aPriority === -1 ? 999 : aPriority;
+      const normalizedBPriority = bPriority === -1 ? 999 : bPriority;
+      if (normalizedAPriority !== normalizedBPriority) return normalizedAPriority - normalizedBPriority;
+      const stageDiff = candidateStageScore(b) - candidateStageScore(a);
+      if (stageDiff !== 0) return stageDiff;
+      return a.walkingMinutes - b.walkingMinutes;
+    });
+
+  const globalCap = options.companion === "아이와 함께" ? 20 : 12;
   const addTop = (source: Place[], limit: number) => {
-    for (const place of source) {
-      if (picked.length >= 12 || limit <= 0) break;
+    let added = 0;
+    for (const place of sortByAtmospherePriority(source)) {
+      if (picked.length >= globalCap || added >= limit) break;
       if (seen.has(place.id)) continue;
+      const coord = coordKey(place);
+      if (seenCoords.has(coord)) continue;
       seen.add(place.id);
+      seenCoords.add(coord);
       picked.push(place);
-      limit -= 1;
+      added += 1;
     }
   };
 
   if (options.transport === "차량") {
     addTop(byStage.filter((p) => ["restaurant", "cafe", "shopping", "mall", "cinema", "activity"].includes(p.category)), 3);
   }
-  if (options.companion === "아이와 함께" || options.companion === "가족과") {
-    addTop(byStage.filter((p) => ["mall", "park", "exhibition", "activity", "cinema", "restaurant", "cafe"].includes(p.category)), 4);
+  if (options.companion === "아이와 함께") {
+    // mall/park/cinema/nature → 카테고리 기본값으로 처리 (applyChildCategoryDefaults), API 불필요
+    // restaurant/cafe/popup/activity/exhibition → 실제 여부 Google API로 확인
+    addTop(
+      byStage.filter((p) =>
+        ["restaurant", "cafe", "popup", "activity", "exhibition"].includes(p.category) &&
+        isChildFriendlyAtmosphereCandidate(p)
+      ),
+      20,
+    );
   }
   if (options.companion === "직장모임") {
     addTop(byStage.filter((p) => ["restaurant", "bar", "cafe"].includes(p.category)), 4);
@@ -164,12 +296,13 @@ async function enrichWithGoogleAtmosphere(places: Place[], options: Recommendati
   if (targets.length === 0) return places;
 
   logger.info("recommend", "Places API (New) atmosphere 대상 선정", {
-    count: targets.length, transport: options.transport, companion: options.companion,
+    count: targets.length,
+    transport: options.transport, companion: options.companion,
   });
   logger.list("placesNew", `🎯 atmosphere 대상 ${targets.length}개`, targets.map((place) => {
     const badges = [
       options.transport === "차량" ? "🚗" : null,
-      options.companion === "아이와 함께" || options.companion === "가족과" ? "🧒" : null,
+      options.companion === "아이와 함께" ? "🧒" : null,
       options.companion === "직장모임" ? "👥" : null,
     ].filter(Boolean).join("");
     return `${badges} ${place.name}(${place.category})`;
@@ -177,43 +310,51 @@ async function enrichWithGoogleAtmosphere(places: Place[], options: Recommendati
 
   const byId = new Map<string, Place>(places.map((place) => [place.id, place]));
 
+  // 좌표 → 동일 위치 place id 목록 (API 결과를 같은 건물 전체에 적용)
+  const coordToIds = new Map<string, string[]>();
+  for (const place of places) {
+    const key = coordKey(place);
+    if (!coordToIds.has(key)) coordToIds.set(key, []);
+    coordToIds.get(key)!.push(place.id);
+  }
+
   await Promise.all(
     targets.map(async (place) => {
       const atmosphere = await getPlaceAtmosphere(
         place.name, place.coordinates,
         {
-          parking: options.transport === "차량",
-          children: options.companion === "아이와 함께" || options.companion === "가족과",
+          parking: options.transport === "차량" || options.requireParking === true,
+          children: options.companion === "아이와 함께" || options.requireChildFacilities === true || options.requireRestroom === true,
           groups: options.companion === "직장모임",
         },
-        place.address, place.phone
+        place.address, place.phone, place.category
       );
       if (!atmosphere) return;
 
-      const current = byId.get(place.id);
-      if (!current) return;
-
-      byId.set(place.id, {
-        ...current,
-        hasParking: atmosphere.hasParking ?? current.hasParking,
-        parkingSummary: atmosphere.parkingSummary ?? current.parkingSummary,
-        goodForChildren: atmosphere.goodForChildren ?? current.goodForChildren,
-        menuForChildren: atmosphere.menuForChildren ?? current.menuForChildren,
-        goodForGroups: atmosphere.goodForGroups ?? current.goodForGroups,
-        restroom: atmosphere.restroom ?? current.restroom,
-        tags: mergeUniqueTags([
-          ...(atmosphere.hasParking ? ["주차 가능"] : []),
-          ...(atmosphere.goodForChildren || atmosphere.menuForChildren ? ["아이 동반"] : []),
-          ...(atmosphere.goodForGroups ? ["단체 모임"] : []),
-          ...current.tags,
-        ]),
-      });
+      for (const id of (coordToIds.get(coordKey(place)) ?? [place.id])) {
+        const current = byId.get(id);
+        if (!current) continue;
+        byId.set(id, {
+          ...current,
+          hasParking: atmosphere.hasParking ?? current.hasParking,
+          parkingSummary: atmosphere.parkingSummary ?? current.parkingSummary,
+          goodForChildren: atmosphere.goodForChildren ?? current.goodForChildren,
+          menuForChildren: atmosphere.menuForChildren ?? current.menuForChildren,
+          goodForGroups: atmosphere.goodForGroups ?? current.goodForGroups,
+          restroom: atmosphere.restroom ?? current.restroom,
+          tags: mergeUniqueTags([
+            ...(atmosphere.hasParking ? ["주차 가능"] : []),
+            ...(atmosphere.goodForChildren || atmosphere.menuForChildren ? ["아이 동반"] : []),
+            ...(atmosphere.goodForGroups ? ["단체 모임"] : []),
+            ...current.tags,
+          ]),
+        });
+      }
     })
   );
 
   return places.map((place) => byId.get(place.id) ?? place);
 }
-
 // ── Layer 2: AI 요약 캐시 (4시간) ─────────────────────────────────
 const aiSummaryCache = new Map<string, { summaries: string[]; expiresAt: number }>();
 const AI_TTL_MS = 4 * 60 * 60 * 1000;
@@ -248,6 +389,9 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     weatherAware: parseWeatherAware(req.query.weatherAware),
     transport: parseTransport(req.query.transport),
     companion: parseCompanion(req.query.companion),
+    requireParking: parseBoolFlag(req.query.requireParking),
+    requireRestroom: parseBoolFlag(req.query.requireRestroom),
+    requireChildFacilities: parseBoolFlag(req.query.requireChildFacilities),
   };
 
   const hasKakaoKey = !!process.env.KAKAO_REST_API_KEY;
@@ -335,8 +479,18 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       .map((p) => `${p.name}${p.tags.includes(POPULAR_CANDIDATE_TAG) ? "(인기후보)" : ""}`);
     logger.list("recommend", `맛집 원천 후보 ${restaurantSourcePool.length}개`, restaurantSourcePool, 15);
 
-    const candidatePlacesBase = selectCandidatePlaces(enrichedPlaces);
-    const candidatePlaces = await enrichWithGoogleAtmosphere(candidatePlacesBase, options);
+    const guardrailedPlaces = applyCompanionGuardrails(enrichedPlaces, options);
+    const candidatePlacesBase = selectCandidatePlaces(guardrailedPlaces);
+    let candidatePlaces = await enrichWithGoogleAtmosphere(candidatePlacesBase, options);
+    if (options.companion === "아이와 함께") {
+      candidatePlaces = applyChildCategoryDefaults(candidatePlaces);
+      const childLog = candidatePlaces.map((p) => {
+        const gfc = p.goodForChildren;
+        const icon = gfc === true ? "✅" : gfc === false ? "❌" : "❓";
+        return `${icon} ${p.name}(${p.category}) goodForChildren=${gfc ?? "null"}`;
+      });
+      logger.list("recommend", `🧒 아이동반 후보 goodForChildren 현황 ${candidatePlaces.length}개`, childLog, 30);
+    }
     logger.info("recommend", "후보 선정 요약", {
       categories: PLACE_CATEGORY_ORDER.map((cat) =>
         `${cat}${candidatePlaces.filter((p) => p.category === cat).length}`
@@ -354,6 +508,9 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
         weatherAware: options.weatherAware ?? true,
         transport: options.transport,
         companion: options.companion ?? "상관없음",
+        requireParking: options.requireParking ?? false,
+        requireRestroom: options.requireRestroom ?? false,
+        requireChildFacilities: options.requireChildFacilities ?? false,
       },
     };
     const scoredPlaces = candidatePlaces.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
