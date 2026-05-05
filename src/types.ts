@@ -20,6 +20,8 @@ export interface Place {
   phone?: string;
   walkingMinutes: number;
   operatingHours: string;
+  operatingHoursNote?: string;
+  operatingHoursMayDiffer?: boolean;
   isOpen: boolean | null;
   representativeMenus?: { name: string; price: number }[];
   subCategory?: string;

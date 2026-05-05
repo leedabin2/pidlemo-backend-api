@@ -97,14 +97,16 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
         const details = await getPlaceDetails(place.name, place.coordinates, place.address, place.phone, place.category);
         if (!details) return place;
 
-        const { hours, rating, reviewCount, priceLevel, photoUrl } = details;
+        const { hours, hoursLabel, hoursMayDiffer, rating, reviewCount, priceLevel, photoUrl } = details;
         const openAtArrival = hours ? isOpenAtOffset(hours, place.walkingMinutes) : null;
         const closingSoon = hours?.closesAtMinutesFromNow !== null && (hours?.closesAtMinutesFromNow ?? Infinity) <= 30;
         const breakTime = closingSoon && hours ? hasBreakTime(hours) : false;
 
         return {
           ...place,
-          operatingHours: hours ? formatOperatingHoursLabel(hours) : place.operatingHours,
+          operatingHours: hoursLabel ?? (hours ? formatOperatingHoursLabel(hours) : place.operatingHours),
+          operatingHoursNote: hoursMayDiffer ? "오늘 영업시간이 달라질 수 있어요" : place.operatingHoursNote,
+          operatingHoursMayDiffer: hoursMayDiffer || place.operatingHoursMayDiffer,
           isOpen: hours ? hours.isOpenNow : place.isOpen,
           googleRating: rating ?? undefined,
           googleReviewCount: reviewCount ?? undefined,
@@ -113,6 +115,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
           googleHours: hours ?? undefined,
           tags: [
             ...place.tags,
+            ...(hoursMayDiffer ? ["시간 변경 가능"] : []),
             ...(breakTime ? ["브레이크타임"] : closingSoon ? ["곧 마감"] : []),
             ...(openAtArrival === false ? ["도착 시 마감"] : []),
           ],

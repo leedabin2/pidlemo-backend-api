@@ -23,6 +23,11 @@ interface Period {
   close?: { day: number; time: string };
 }
 
+interface SpecialDay {
+  date?: string;
+  exceptional_hours?: boolean;
+}
+
 export interface PlaceHours {
   isOpenNow: boolean;
   closesAtMinutesFromNow: number | null; // null = 알 수 없음 or 24시간
@@ -31,6 +36,8 @@ export interface PlaceHours {
 
 export interface PlaceDetails {
   hours: PlaceHours | null;
+  hoursLabel?: string;
+  hoursMayDiffer?: boolean;
   rating: number | null;
   reviewCount: number | null;
   priceLevel: 0 | 1 | 2 | 3 | 4 | null;
@@ -295,6 +302,16 @@ export function formatOperatingHoursLabel(hours: PlaceHours): string {
   return windows.join(" / ");
 }
 
+function currentWeekdayTextLabel(weekdayText?: string[]): string | undefined {
+  if (!weekdayText || weekdayText.length === 0) return undefined;
+  const todayIndex = getKoreaTimeParts(new Date()).day;
+  const todayLine = weekdayText[todayIndex];
+  if (!todayLine) return undefined;
+
+  const [, rest] = todayLine.split(/:\s*/, 2);
+  return rest ? todayLine.replace(/:\s+/, " ") : todayLine;
+}
+
 function detailsFromCache(entry: CacheEntry): PlaceDetails {
   return {
     hours: buildHoursFromPeriods(entry.periods),
@@ -535,6 +552,36 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[^가-힣a-z0-9]/g, "");
 }
 
+function splitRawNameTokens(value: string): string[] {
+  return value
+    .split(/[\s/(),[\]{}|·]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function normalizeNameToken(token: string): string {
+  return normalizeText(token).replace(/(직영점|본점|지점|점)$/g, "");
+}
+
+function leadingNameToken(value: string): string {
+  const first = splitRawNameTokens(value)[0] ?? value;
+  return normalizeNameToken(first);
+}
+
+function exactNameLikeMatch(expectedName: string, candidateName: string): boolean {
+  const normC = normalizeText(candidateName);
+  const normE = normalizeText(expectedName);
+  if (!normC || !normE) return false;
+  if (normC === normE || normC.includes(normE) || normE.includes(normC)) return true;
+
+  const stripped = normalizeText(stripBranchSuffix(expectedName));
+  if (stripped && stripped !== normE && (normC === stripped || normC.includes(stripped) || stripped.includes(normC))) {
+    return true;
+  }
+
+  return false;
+}
+
 function normalizePhone(value: string | undefined | null): string {
   if (!value) return "";
   let digits = value.replace(/\D/g, "");
@@ -558,7 +605,7 @@ function calcPhoneScore(expectedPhone?: string, resolvedPhone?: string | null): 
   if (expected === resolved) return 15;
   const suffixLen = Math.min(8, expected.length, resolved.length);
   if (suffixLen >= 6 && expected.slice(-suffixLen) === resolved.slice(-suffixLen)) return 10;
-  return -20;
+  return -12;
 }
 
 function categoryLooksLikeComplexOrBuilding(types: string[]): boolean {
@@ -601,12 +648,17 @@ function categoryTypeCompatible(expectedCategory: PlaceCategory | undefined, typ
 }
 
 function namesLookCompatible(expectedName: string, candidateName: string): boolean {
+  if (exactNameLikeMatch(expectedName, candidateName)) return true;
+
   const normE = normalizeText(expectedName);
   const normC = normalizeText(candidateName);
   if (!normE || !normC) return false;
-  if (normC === normE || normC.includes(normE) || normE.includes(normC)) return true;
-  const stripped = normalizeText(stripBranchSuffix(expectedName));
-  if (stripped && stripped !== normE && (normC === stripped || normC.includes(stripped) || stripped.includes(normC))) return true;
+
+  const anchorE = leadingNameToken(expectedName);
+  const anchorC = leadingNameToken(candidateName);
+  if (anchorE && anchorC && anchorE === anchorC) return true;
+  if (anchorE && normC.includes(anchorE)) return true;
+
   return false;
 }
 
@@ -707,19 +759,28 @@ function calcDistanceScore(loc: { latitude: number; longitude: number } | undefi
 
 function calcNameScore(candidateName: string | undefined, expectedName: string): number {
   if (!candidateName) return 0;
+  if (exactNameLikeMatch(expectedName, candidateName)) return 20;
+
   const normC = normalizeText(candidateName);
   const normE = normalizeText(expectedName);
   if (!normC || !normE) return 0;
 
-  if (normC === normE || normC.includes(normE) || normE.includes(normC)) return 20;
-
   const stripped = normalizeText(stripBranchSuffix(expectedName));
   if (stripped && stripped !== normE && (normC === stripped || normC.includes(stripped) || stripped.includes(normC))) return 16;
 
-  const tokensC = normC.match(/[가-힣]{2,}|[a-z0-9]{2,}/g) ?? [];
-  const tokensE = normE.match(/[가-힣]{2,}|[a-z0-9]{2,}/g) ?? [];
+  const anchorE = leadingNameToken(expectedName);
+  const anchorC = leadingNameToken(candidateName);
+  if (anchorE && anchorC && anchorE === anchorC) return 14;
+  if (anchorE && normC.includes(anchorE)) return 12;
+
+  const tokensC = splitRawNameTokens(candidateName)
+    .map(normalizeNameToken)
+    .filter((token) => token.length >= 2);
+  const tokensE = splitRawNameTokens(expectedName)
+    .map(normalizeNameToken)
+    .filter((token) => token.length >= 2);
   if (tokensE.length === 0) return 0;
-  const ratio = tokensE.filter((t) => tokensC.some((c) => c.includes(t) || t.includes(c))).length / tokensE.length;
+  const ratio = tokensE.filter((t) => tokensC.some((c) => c === t || c.includes(t) || t.includes(c))).length / tokensE.length;
   if (ratio >= 0.7) return 12;
   if (ratio >= 0.4) return 6;
   return 0;
@@ -813,6 +874,10 @@ async function findPlaceIdScored(
       formattedAddress: c.formattedAddress,
       types: c.types,
     }))
+    .filter((candidate) => {
+      if (!isTenantLikeCategory(expectedCategory)) return true;
+      return namesLookCompatible(name, candidate.displayName);
+    })
     .map((c) => ({
       ...c,
       baseScore: c.distanceScore + c.nameScore + c.addressScore + c.categoryScore,
@@ -848,6 +913,90 @@ function candidateLooksTooBroad(
   return true;
 }
 
+function isTenantLikeCategory(expectedCategory?: PlaceCategory): boolean {
+  return ["restaurant", "cafe", "shopping", "bar", "photo", "activity", "cinema"].includes(
+    expectedCategory ?? "",
+  );
+}
+
+function isTenantLikeResolvedType(types?: string[]): boolean {
+  if (!types || types.length === 0) return false;
+  return types.some((type) =>
+    [
+      "restaurant",
+      "cafe",
+      "coffee_shop",
+      "bakery",
+      "store",
+      "clothing_store",
+      "home_goods_store",
+      "book_store",
+      "bar",
+      "pub",
+      "movie_theater",
+      "amusement_center",
+      "video_arcade",
+      "gym",
+      "sports_complex",
+      "museum",
+      "art_gallery",
+      "photographer",
+      "photo_studio",
+    ].includes(type),
+  );
+}
+
+function shouldTryLegacyFallbackForTenant(
+  expectedName: string,
+  coords: Coordinates,
+  expectedCategory: PlaceCategory | undefined,
+  evaluated: Array<MatchResolution & { valid: boolean }>,
+): boolean {
+  if (!isTenantLikeCategory(expectedCategory) || evaluated.length === 0) return false;
+
+  return evaluated.every((item) => {
+    const distance =
+      item.details?.resolvedCoords ? haversineDistanceMeters(coords, item.details.resolvedCoords) : Infinity;
+    const broad = item.details ? candidateLooksTooBroad(item.details, expectedName, expectedCategory) : false;
+    const tenantLike = isTenantLikeResolvedType(item.details?.types);
+    return distance <= 100 && (!item.valid || broad || !tenantLike);
+  });
+}
+
+function canRelaxCategoryTypeCheck(
+  expectedName: string,
+  coords: Coordinates,
+  expectedCategory: PlaceCategory | undefined,
+  resolved: ResolvedIdentity,
+): boolean {
+  if (!expectedCategory || !resolved.name || !resolved.coords) return false;
+  if (!["activity", "exhibition", "park", "nature"].includes(expectedCategory)) return false;
+  if (!exactNameLikeMatch(expectedName, resolved.name)) return false;
+
+  const distanceMeters = haversineDistanceMeters(coords, resolved.coords);
+  return distanceMeters <= 25;
+}
+
+function canRelaxBroadPoiCheck(
+  expectedName: string,
+  coords: Coordinates,
+  expectedCategory: PlaceCategory | undefined,
+  resolved: ResolvedIdentity,
+): boolean {
+  if (!resolved.types || !resolved.name || !resolved.coords) return false;
+  if (!categoryLooksLikeComplexOrBuilding(resolved.types)) return false;
+
+  if (canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, resolved)) {
+    return true;
+  }
+
+  if (!isTenantLikeCategory(expectedCategory)) return false;
+  if (!namesLookCompatible(expectedName, resolved.name)) return false;
+
+  const distanceMeters = haversineDistanceMeters(coords, resolved.coords);
+  return distanceMeters <= 90;
+}
+
 function calcResolutionScore(
   candidate: ScoredCandidate,
   details: PlaceDetails,
@@ -859,6 +1008,10 @@ function calcResolutionScore(
   expectedCategory: PlaceCategory | undefined,
 ): number {
   let score = candidate.baseScore;
+  const exactNameMatched = !!details.resolvedName && exactNameLikeMatch(expectedName, details.resolvedName);
+  const exactDistance = details.resolvedCoords
+    ? haversineDistanceMeters(coords, details.resolvedCoords)
+    : Infinity;
 
   const structuredAddressScore = compareStructuredAddress(
     expectedStructuredAddress,
@@ -877,16 +1030,40 @@ function calcResolutionScore(
   score += calcPhoneScore(expectedPhone, details.resolvedPhone);
 
   if (!phonesLookCompatible(expectedPhone, details.resolvedPhone)) {
-    score -= 10;
+    if (exactNameMatched && exactDistance <= 90) {
+      score += 8;
+    } else {
+      score -= 4;
+    }
   }
 
   if (details.resolvedCoords) {
-    const exactDistance = haversineDistanceMeters(coords, details.resolvedCoords);
     if (exactDistance > PRIMARY_MATCH_MAX_DISTANCE_METERS) score -= 30;
     else if (exactDistance > 120) score -= 10;
+    else if (
+      exactDistance <= 40 &&
+      isTenantLikeCategory(expectedCategory) &&
+      isTenantLikeResolvedType(details.types)
+    ) {
+      score += 8;
+    }
   }
 
-  if (!categoryTypeCompatible(expectedCategory, details.types)) {
+  if (
+    exactNameMatched &&
+    exactDistance <= 90 &&
+    categoryTypeCompatible(expectedCategory, details.types)
+  ) {
+    score += 10;
+  }
+
+  if (
+    !categoryTypeCompatible(expectedCategory, details.types) &&
+    !canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, {
+      name: details.resolvedName,
+      coords: details.resolvedCoords,
+    })
+  ) {
     score -= 10;
   }
 
@@ -907,10 +1084,10 @@ async function resolvePlaceMatch(
   const kakaoStructuredAddress = await fetchKakaoStructuredAddress(coords, address);
   const scoredCandidates = await findPlaceIdScored(name, coords, address, expectedCategory);
   let hadNewApiCandidates = scoredCandidates.length > 0;
+  let evaluated: Array<MatchResolution & { valid: boolean }> = [];
 
   if (scoredCandidates.length > 0) {
     const topCandidates = scoredCandidates.slice(0, 3);
-    const evaluated: Array<MatchResolution & { valid: boolean }> = [];
 
     for (const candidate of topCandidates) {
       const details = await fetchPlaceDetails(candidate.id);
@@ -977,11 +1154,18 @@ async function resolvePlaceMatch(
   }
 
   if (hadNewApiCandidates) {
+    if (shouldTryLegacyFallbackForTenant(name, coords, expectedCategory, evaluated)) {
+      logger.warn("googlePlaces", "legacy fallback 재허용", {
+        name,
+        reason: "복합몰 입점 매장 후보가 broad POI 위주로 판단됨",
+      });
+    } else {
     logger.warn("googlePlaces", "legacy fallback 생략", {
       name,
       reason: "New API 후보는 있었지만 점수 기준 미달",
     });
     return null;
+    }
   }
 
   const fallbackId = await findPlaceId(name, coords, address, phone);
@@ -1029,7 +1213,6 @@ function validateResolvedIdentity(
       expectedPhone,
       resolvedPhone: resolved.phone ?? "-",
     });
-    return false;
   }
   if (resolved.coords) {
     const distanceMeters = haversineDistanceMeters(coords, resolved.coords);
@@ -1057,7 +1240,10 @@ function validateResolvedIdentity(
       return false;
     }
   }
-  if (!categoryTypeCompatible(expectedCategory, resolved.types)) {
+  if (
+    !categoryTypeCompatible(expectedCategory, resolved.types) &&
+    !canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, resolved)
+  ) {
     logger.info("googlePlaces", "후보 제외: 상세 타입 불일치", {
       expected: expectedName,
       category: expectedCategory,
@@ -1065,7 +1251,13 @@ function validateResolvedIdentity(
     });
     return false;
   }
-  if (expectedCategory && expectedCategory !== "mall" && categoryLooksLikeComplexOrBuilding(resolved.types ?? []) && !categoryTypeCompatible(expectedCategory, resolved.types)) {
+  if (
+    expectedCategory &&
+    expectedCategory !== "mall" &&
+    categoryLooksLikeComplexOrBuilding(resolved.types ?? []) &&
+    !categoryTypeCompatible(expectedCategory, resolved.types) &&
+    !canRelaxBroadPoiCheck(expectedName, coords, expectedCategory, resolved)
+  ) {
     logger.info("googlePlaces", "후보 제외: 복합몰/건물 POI로 판단", {
       expected: expectedName,
       category: expectedCategory,
@@ -1229,6 +1421,7 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
     "geometry",
     "types",
     "opening_hours",
+    "current_opening_hours",
     "rating",
     "user_ratings_total",
     "price_level",
@@ -1247,7 +1440,13 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
       international_phone_number?: string;
       geometry?: { location?: { lat: number; lng: number } };
       types?: string[];
-      opening_hours?: { open_now: boolean; periods: Period[] };
+      opening_hours?: { open_now: boolean; periods: Period[]; weekday_text?: string[] };
+      current_opening_hours?: {
+        open_now?: boolean;
+        periods?: Period[];
+        weekday_text?: string[];
+        special_days?: SpecialDay[];
+      };
       rating?: number;
       user_ratings_total?: number;
       price_level?: number;
@@ -1260,9 +1459,14 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
     return { hours: null, rating: null, reviewCount: null, priceLevel: null, photoUrl: null };
   }
 
-  const hours: PlaceHours | null = result.opening_hours
-    ? buildHoursFromPeriods(result.opening_hours.periods, result.opening_hours.open_now)
+  const hoursSource = result.current_opening_hours ?? result.opening_hours;
+  const hours: PlaceHours | null = hoursSource
+    ? buildHoursFromPeriods(hoursSource.periods ?? [], hoursSource.open_now)
     : null;
+  const hoursLabel = currentWeekdayTextLabel(result.current_opening_hours?.weekday_text)
+    ?? currentWeekdayTextLabel(result.opening_hours?.weekday_text)
+    ?? (hours ? formatOperatingHoursLabel(hours) : undefined);
+  const hoursMayDiffer = result.current_opening_hours?.special_days?.some((day) => day.exceptional_hours === true) ?? false;
 
   // 대표 사진 URL 생성 (maxwidth=400)
   const photoRef = result.photos?.[0]?.photo_reference ?? null;
@@ -1272,6 +1476,8 @@ async function fetchPlaceDetails(placeId: string): Promise<PlaceDetails> {
 
   return {
     hours,
+    hoursLabel,
+    hoursMayDiffer,
     rating: result.rating ?? null,
     reviewCount: result.user_ratings_total ?? null,
     priceLevel: (result.price_level as 0 | 1 | 2 | 3 | 4 | undefined) ?? null,
