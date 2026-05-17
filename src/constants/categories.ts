@@ -21,16 +21,16 @@ export const CATEGORY_TITLE: Record<PlaceCategory, string> = {
 };
 
 export const CATEGORY_CANDIDATE_LIMIT: Record<PlaceCategory, number> = {
-  cafe: 8,
-  restaurant: 8,
-  shopping: 6,
+  cafe: 14,
+  restaurant: 12,
+  shopping: 8,
   mall: 5,
   popup: 6,
-  exhibition: 6,
+  exhibition: 10,
   park: 5,
-  bar: 6,
-  photo: 6,
+  bar: 8,
+  photo: 10,
   nature: 5,
-  cinema: 4,
-  activity: 6,
+  cinema: 8,
+  activity: 8,
 };

@@ -40,6 +40,10 @@ export interface Place {
   menuForChildren?: boolean;
   goodForGroups?: boolean;
   restroom?: boolean;
+  liveMusic?: boolean;
+  outdoorSeating?: boolean;
+  servesCocktails?: boolean;
+  googleTypes?: string[];
   googleHours?: {
     isOpenNow: boolean;
     closesAtMinutesFromNow: number | null;

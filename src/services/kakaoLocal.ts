@@ -198,7 +198,8 @@ interface KakaoDocument {
 async function searchByCategory(
   categoryCode: "CE7" | "FD6" | "AT4",
   coords: Coordinates,
-  size = DEFAULT_SEARCH_SIZE
+  size = DEFAULT_SEARCH_SIZE,
+  radius = RADIUS
 ): Promise<KakaoDocument[]> {
   if (!API_KEY) return [];
 
@@ -209,7 +210,7 @@ async function searchByCategory(
         category_group_code: categoryCode,
         x: coords.lng,
         y: coords.lat,
-        radius: RADIUS,
+        radius,
         size: Math.min(size, KAKAO_MAX_PAGE_SIZE),
         sort: "distance",
       },
@@ -310,8 +311,8 @@ async function docsToPlaces(
   );
 }
 
-export async function getNearByCafes(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByCategory("CE7", coords, 16);
+export async function getNearByCafes(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
+  const docs = await searchByCategory("CE7", coords, 16, baseRadius);
   const filtered = docs.filter(isCafeCandidate);
   logger.info("kakao", "카페 검색 결과", { raw: docs.length, filtered: filtered.length });
   return docsToPlaces(filtered.slice(0, DEFAULT_CATEGORY_LIMIT), "cafe");
@@ -319,8 +320,8 @@ export async function getNearByCafes(coords: Coordinates): Promise<Place[]> {
 
 const RESTAURANT_EXCLUDE_CATEGORY_KW = ["베이커리", "제과", "빵", "케이크", "디저트", "패스트푸드", "분식"];
 
-export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByCategory("FD6", coords, 14);
+export async function getNearByRestaurants(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
+  const docs = await searchByCategory("FD6", coords, 14, baseRadius);
   const filtered = docs.filter(
     (doc) => !RESTAURANT_EXCLUDE_CATEGORY_KW.some((kw) => doc.category_name.includes(kw))
   );
@@ -328,10 +329,10 @@ export async function getNearByRestaurants(coords: Coordinates): Promise<Place[]
   return docsToPlaces(filtered.slice(0, DEFAULT_CATEGORY_LIMIT), "restaurant");
 }
 
-export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Place[]> {
+export async function getNearByShoppingPlaces(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["소품샵", "편집샵", "라이프스타일샵", "감성문구", "디자인문구", "리빙소품", "셀렉트숍"];
 
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 10, 1800)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 10, Math.max(1800, baseRadius))));
 
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
@@ -358,10 +359,10 @@ export async function getNearByShoppingPlaces(coords: Coordinates): Promise<Plac
   }));
 }
 
-export async function getNearByMallPlaces(coords: Coordinates): Promise<Place[]> {
+export async function getNearByMallPlaces(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["복합쇼핑몰", "쇼핑몰", "백화점", "아울렛"];
 
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 10, 4000)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 10, Math.max(4000, baseRadius))));
 
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
@@ -388,9 +389,9 @@ export async function getNearByMallPlaces(coords: Coordinates): Promise<Place[]>
   }));
 }
 
-export async function getNearByPhotoBooth(coords: Coordinates): Promise<Place[]> {
+export async function getNearByPhotoBooth(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["인생네컷", "포토이즘", "하루필름", "포토부스", "셀프사진관"];
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, 2000)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, Math.max(2000, baseRadius))));
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
     for (const doc of docs) {
@@ -413,9 +414,9 @@ export async function getNearByPhotoBooth(coords: Coordinates): Promise<Place[]>
   }));
 }
 
-export async function getNearByBars(coords: Coordinates): Promise<Place[]> {
+export async function getNearByBars(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["이자카야", "와인바", "칵테일바", "루프탑바", "포차"];
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, 1500)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, Math.max(1500, baseRadius))));
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
     for (const doc of docs) {
@@ -440,9 +441,9 @@ export async function getNearByBars(coords: Coordinates): Promise<Place[]> {
   });
 }
 
-export async function getNearByNaturePlaces(coords: Coordinates): Promise<Place[]> {
+export async function getNearByNaturePlaces(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["등산로", "해수욕장", "해변", "목장", "식물원", "수목원", "오름"];
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 6, 15000)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 6, Math.max(15000, baseRadius))));
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
     for (const doc of docs) {
@@ -463,8 +464,8 @@ export async function getNearByNaturePlaces(coords: Coordinates): Promise<Place[
   }));
 }
 
-export async function getNearByCinemas(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByKeyword("영화관", coords, 8, 5000);
+export async function getNearByCinemas(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
+  const docs = await searchByKeyword("영화관", coords, 8, Math.max(5000, baseRadius));
   const cinemaDocs = docs
     .filter((doc) =>
       doc.place_name.includes("CGV") ||
@@ -522,8 +523,8 @@ export function getMockWellnessPlaces(coords: Coordinates): Place[] {
 const PARK_CATEGORY_KW = ["공원", "자연경관", "관광,명소", "유원지", "숲", "수목원", "정원", "한강", "생태"];
 const PARK_EXCLUDE_CATEGORY_KW_LIST = ["인테리어", "가구", "음식점", "카페", "병원", "학원", "편의점", "주차"];
 
-export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByKeyword("공원", coords, 12);
+export async function getNearByParks(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
+  const docs = await searchByKeyword("공원", coords, 12, baseRadius);
   const parkDocs = docs
     .filter((doc) => {
       const cat = doc.category_name;
@@ -546,8 +547,8 @@ export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
 const AT4_EXCLUDE_KW = ["음식점", "카페", "편의점", "주차", "키즈", "키즈카페", "놀이방", "어린이", "유아"];
 
 // AT4: 카카오 관광명소 카테고리 (공원·명소·역사유적·자연경관 포함)
-export async function getNearByTouristSpots(coords: Coordinates): Promise<Place[]> {
-  const docs = await searchByCategory("AT4", coords, 12);
+export async function getNearByTouristSpots(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
+  const docs = await searchByCategory("AT4", coords, 12, baseRadius);
   const filtered = docs
     .filter(isTouristSpotCandidate)
     .slice(0, DEFAULT_CATEGORY_LIMIT);
@@ -570,9 +571,9 @@ export async function getNearByTouristSpots(coords: Coordinates): Promise<Place[
 }
 
 // 갤러리·미술관·박물관·공연장 키워드 검색
-export async function getNearByCultureVenues(coords: Coordinates): Promise<Place[]> {
+export async function getNearByCultureVenues(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["갤러리", "미술관", "박물관", "전시관", "공연장", "문화센터", "아트홀", "복합문화공간"];
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 6, 3000)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 6, Math.max(3000, baseRadius))));
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
     for (const doc of docs) {
@@ -599,7 +600,7 @@ export async function getNearByCultureVenues(coords: Coordinates): Promise<Place
 
 // 카카오 accuracy(인기/관련도) 정렬로 인기 장소 수집
 // sort=accuracy → 카카오맵 내 리뷰수·저장수·방문수 기반 정렬
-export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place[]> {
+export async function getNearByPopularPlaces(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries: Array<{ query: string; category: Place["category"]; filter?: (doc: KakaoDocument) => boolean }> = [
     { query: "카페",   category: "cafe", filter: isCafeCandidate },
     { query: "맛집",   category: "restaurant",
@@ -614,7 +615,7 @@ export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place
 
   const results = await Promise.all(
     queries.map(({ query, category, filter }) =>
-      searchByKeyword(query, coords, 8, 3000, "accuracy").then((docs) => {
+      searchByKeyword(query, coords, 8, Math.max(3000, baseRadius), "accuracy").then((docs) => {
         const filtered = filter ? docs.filter(filter) : docs;
         return docsToPlaces(filtered.slice(0, 4), category);
       })
@@ -638,9 +639,9 @@ export async function getNearByPopularPlaces(coords: Coordinates): Promise<Place
 // 공공 API에 없는 소규모 행사도 카카오맵 등록 기준으로 잡힘
 const POPUP_QUERIES = ["팝업스토어", "팝업", "플리마켓", "야시장", "버스킹", "축제", "마켓"];
 
-export async function getNearByKakaoPopups(coords: Coordinates): Promise<Place[]> {
+export async function getNearByKakaoPopups(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const results = await Promise.all(
-    POPUP_QUERIES.map((q) => searchByKeyword(q, coords, 8, 2000))
+    POPUP_QUERIES.map((q) => searchByKeyword(q, coords, 8, Math.max(2000, baseRadius)))
   );
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
@@ -658,9 +659,9 @@ export async function getNearByKakaoPopups(coords: Coordinates): Promise<Place[]
   return docsToPlaces(popupDocs, "popup");
 }
 
-export async function getNearByActivityPlaces(coords: Coordinates): Promise<Place[]> {
+export async function getNearByActivityPlaces(coords: Coordinates, baseRadius = RADIUS): Promise<Place[]> {
   const queries = ["만화카페", "보드게임카페", "방탈출", "오락실"];
-  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, 2000)));
+  const results = await Promise.all(queries.map((q) => searchByKeyword(q, coords, 8, Math.max(2000, baseRadius))));
   const deduped = new Map<string, KakaoDocument>();
   for (const docs of results) {
     for (const doc of docs) {

@@ -29,8 +29,9 @@ export interface PlacePool {
 const placePoolCache = new Map<string, { pool: PlacePool; expiresAt: number }>();
 const POOL_TTL_MS = 2 * 60 * 60 * 1000;
 
-export function poolKey(coords: Coordinates, seoul: boolean): string {
-  return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}_${seoul ? "s" : "n"}`;
+export function poolKey(coords: Coordinates, seoul: boolean, transport: "도보" | "대중교통" | "차량" = "도보"): string {
+  const t = transport === "차량" ? "car" : transport === "대중교통" ? "transit" : "walk";
+  return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}_${seoul ? "s" : "n"}_${t}`;
 }
 
 export function getCachedPool(key: string): PlacePool | null {
@@ -48,7 +49,9 @@ export async function fetchPlacePool(
   seoul: boolean,
   hasKakaoKey: boolean,
   hasTourKey: boolean,
+  transport: "도보" | "대중교통" | "차량" = "도보",
 ): Promise<PlacePool> {
+  const baseRadius = transport === "차량" ? 4500 : transport === "대중교통" ? 2500 : 1500;
   const [
     cafes, restaurants, shoppingPlaces, mallPlaces, kakaoParks,
     photoBooths, bars, naturePlaces, cinemas,
@@ -56,25 +59,25 @@ export async function fetchPlacePool(
     tourAttractions, tourCulture, tourFestivals,
     seoulPopups, seoulParks, activityPlaces,
   ] = await Promise.all([
-    hasKakaoKey ? getNearByCafes(coords) : Promise.resolve(getMockCafes(coords)),
-    hasKakaoKey ? getNearByRestaurants(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByShoppingPlaces(coords) : Promise.resolve(getMockShoppingPlaces(coords)),
-    hasKakaoKey ? getNearByMallPlaces(coords) : Promise.resolve(getMockMallPlaces(coords)),
-    hasKakaoKey ? getKakaoParks(coords) : Promise.resolve(getMockKakaoParks(coords)),
-    hasKakaoKey ? getNearByPhotoBooth(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByBars(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByNaturePlaces(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByCinemas(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByKakaoPopups(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByPopularPlaces(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByTouristSpots(coords) : Promise.resolve([]),
-    hasKakaoKey ? getNearByCultureVenues(coords) : Promise.resolve([]),
+    hasKakaoKey ? getNearByCafes(coords, baseRadius) : Promise.resolve(getMockCafes(coords)),
+    hasKakaoKey ? getNearByRestaurants(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByShoppingPlaces(coords, baseRadius) : Promise.resolve(getMockShoppingPlaces(coords)),
+    hasKakaoKey ? getNearByMallPlaces(coords, baseRadius) : Promise.resolve(getMockMallPlaces(coords)),
+    hasKakaoKey ? getKakaoParks(coords, baseRadius) : Promise.resolve(getMockKakaoParks(coords)),
+    hasKakaoKey ? getNearByPhotoBooth(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByBars(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByNaturePlaces(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByCinemas(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByKakaoPopups(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByPopularPlaces(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByTouristSpots(coords, baseRadius) : Promise.resolve([]),
+    hasKakaoKey ? getNearByCultureVenues(coords, baseRadius) : Promise.resolve([]),
     hasTourKey ? getTourAttractions(coords) : Promise.resolve(getMockAttractions(coords)),
     hasTourKey ? getTourCulture(coords) : Promise.resolve([]),
     hasTourKey ? getTourFestivals(coords) : Promise.resolve(getMockFestivals(coords)),
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
-    hasKakaoKey ? getNearByActivityPlaces(coords) : Promise.resolve([]),
+    hasKakaoKey ? getNearByActivityPlaces(coords, baseRadius) : Promise.resolve([]),
   ]);
 
   return {

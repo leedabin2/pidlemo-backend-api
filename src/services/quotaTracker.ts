@@ -11,6 +11,14 @@ interface QuotaConfig {
   freeCap: number;
 }
 
+export interface QuotaUsageSnapshotItem {
+  sku: QuotaSku;
+  label: string;
+  freeCap: number;
+  used: number;
+  remainingFree: number;
+}
+
 const QUOTA_CONFIG: Record<QuotaSku, QuotaConfig> = {
   google_find_place_legacy_pro: {
     label: "Google Find Place Legacy(Pro)",
@@ -56,7 +64,7 @@ export function recordQuotaUsage(sku: QuotaSku, count = 1): void {
   usageStore.set(key, current + count);
 }
 
-export function getQuotaUsageSnapshot() {
+export function getQuotaUsageSnapshot(): QuotaUsageSnapshotItem[] {
   return Object.entries(QUOTA_CONFIG).map(([sku, config]) => {
     const used = usageStore.get(usageKey(sku as QuotaSku)) ?? 0;
     return {
@@ -65,6 +73,22 @@ export function getQuotaUsageSnapshot() {
       freeCap: config.freeCap,
       used,
       remainingFree: Math.max(0, config.freeCap - used),
+    };
+  });
+}
+
+export function diffQuotaUsage(
+  before: QuotaUsageSnapshotItem[],
+  after: QuotaUsageSnapshotItem[],
+): QuotaUsageSnapshotItem[] {
+  const beforeMap = new Map(before.map((item) => [item.sku, item]));
+  return after.map((item) => {
+    const previous = beforeMap.get(item.sku);
+    const used = item.used - (previous?.used ?? 0);
+    return {
+      ...item,
+      used,
+      remainingFree: Math.max(0, item.freeCap - used),
     };
   });
 }

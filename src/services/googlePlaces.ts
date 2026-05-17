@@ -54,6 +54,9 @@ export interface PlaceDetails {
   menuForChildren?: boolean;
   goodForGroups?: boolean;
   restroom?: boolean;
+  liveMusic?: boolean;
+  outdoorSeating?: boolean;
+  servesCocktails?: boolean;
 }
 
 interface CacheEntry {
@@ -69,6 +72,10 @@ interface CacheEntry {
   menuForChildren?: boolean;
   goodForGroups?: boolean;
   restroom?: boolean;
+  liveMusic?: boolean;
+  outdoorSeating?: boolean;
+  servesCocktails?: boolean;
+  googleTypes?: string[];
   expiresAt: number;
 }
 
@@ -85,6 +92,7 @@ export interface PlaceAtmosphereOptions {
   parking?: boolean;
   children?: boolean;
   groups?: boolean;
+  date?: boolean;
 }
 
 export interface PlaceAtmosphereDetails {
@@ -94,13 +102,23 @@ export interface PlaceAtmosphereDetails {
   menuForChildren?: boolean;
   goodForGroups?: boolean;
   restroom?: boolean;
+  liveMusic?: boolean;
+  outdoorSeating?: boolean;
+  servesCocktails?: boolean;
 }
 
 const cache = new Map<string, CacheEntry>();
 const kakaoAddressCache = new Map<string, { value: StructuredAddress | null; expiresAt: number }>();
 const atmosphereCache = new Map<string, { details: PlaceAtmosphereDetails; expiresAt: number }>();
 const atmosphereInFlight = new Map<string, Promise<PlaceAtmosphereDetails>>();
+// 매칭 실패 캐시 — 못 찾은 장소는 30분간 재시도 차단
+const matchFailureCache = new Map<string, number>(); // key → expiresAt
+const MATCH_FAILURE_TTL_MS = 30 * 60 * 1000;
+// 기본 상세 동시 중복 호출 방지
+const detailsInFlight = new Map<string, Promise<PlaceDetails | null>>();
 const PRIMARY_MATCH_MAX_DISTANCE_METERS = 220;
+const TENANT_BROAD_POI_RELAX_DISTANCE_METERS = 120;
+const TENANT_LEGACY_FALLBACK_DISTANCE_METERS = 140;
 
 // ── New Places API 후보 검색 ──────────────────────────────────────────
 const SEARCH_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.businessStatus";
@@ -325,6 +343,10 @@ function detailsFromCache(entry: CacheEntry): PlaceDetails {
     menuForChildren: entry.menuForChildren,
     goodForGroups: entry.goodForGroups,
     restroom: entry.restroom,
+    liveMusic: entry.liveMusic,
+    outdoorSeating: entry.outdoorSeating,
+    servesCocktails: entry.servesCocktails,
+    types: entry.googleTypes,
   };
 }
 
@@ -340,6 +362,11 @@ function atmosphereFieldsMask(options: PlaceAtmosphereOptions): string | null {
     fields.add("goodForGroups");
     fields.add("reservable");
   }
+  if (options.date) {
+    fields.add("liveMusic");
+    fields.add("outdoorSeating");
+    fields.add("servesCocktails");
+  }
   return fields.size > 0 ? [...fields].join(",") : null;
 }
 
@@ -351,6 +378,7 @@ function hasAtmosphereFields(
   if (options.parking && details.hasParking === undefined && details.parkingSummary === undefined) return false;
   if (options.children && details.goodForChildren === undefined && details.menuForChildren === undefined && details.restroom === undefined) return false;
   if (options.groups && details.goodForGroups === undefined) return false;
+  if (options.date && details.liveMusic === undefined && details.outdoorSeating === undefined && details.servesCocktails === undefined) return false;
   return true;
 }
 
@@ -959,7 +987,7 @@ function shouldTryLegacyFallbackForTenant(
       item.details?.resolvedCoords ? haversineDistanceMeters(coords, item.details.resolvedCoords) : Infinity;
     const broad = item.details ? candidateLooksTooBroad(item.details, expectedName, expectedCategory) : false;
     const tenantLike = isTenantLikeResolvedType(item.details?.types);
-    return distance <= 100 && (!item.valid || broad || !tenantLike);
+    return distance <= TENANT_LEGACY_FALLBACK_DISTANCE_METERS && (!item.valid || broad || !tenantLike);
   });
 }
 
@@ -994,7 +1022,7 @@ function canRelaxBroadPoiCheck(
   if (!namesLookCompatible(expectedName, resolved.name)) return false;
 
   const distanceMeters = haversineDistanceMeters(coords, resolved.coords);
-  return distanceMeters <= 90;
+  return distanceMeters <= TENANT_BROAD_POI_RELAX_DISTANCE_METERS;
 }
 
 function calcResolutionScore(
@@ -1012,6 +1040,12 @@ function calcResolutionScore(
   const exactDistance = details.resolvedCoords
     ? haversineDistanceMeters(coords, details.resolvedCoords)
     : Infinity;
+  const categoryCompatible = categoryTypeCompatible(expectedCategory, details.types);
+  const broadPoiRelaxed = canRelaxBroadPoiCheck(expectedName, coords, expectedCategory, {
+    name: details.resolvedName,
+    coords: details.resolvedCoords,
+    types: details.types,
+  });
 
   const structuredAddressScore = compareStructuredAddress(
     expectedStructuredAddress,
@@ -1052,13 +1086,14 @@ function calcResolutionScore(
   if (
     exactNameMatched &&
     exactDistance <= 90 &&
-    categoryTypeCompatible(expectedCategory, details.types)
+    (categoryCompatible || broadPoiRelaxed)
   ) {
     score += 10;
   }
 
   if (
-    !categoryTypeCompatible(expectedCategory, details.types) &&
+    !categoryCompatible &&
+    !broadPoiRelaxed &&
     !canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, {
       name: details.resolvedName,
       coords: details.resolvedCoords,
@@ -1067,7 +1102,7 @@ function calcResolutionScore(
     score -= 10;
   }
 
-  if (candidateLooksTooBroad(details, expectedName, expectedCategory)) {
+  if (candidateLooksTooBroad(details, expectedName, expectedCategory) && !broadPoiRelaxed) {
     score -= 15;
   }
 
@@ -1206,6 +1241,9 @@ function validateResolvedIdentity(
 ): boolean {
   if (!resolved.name) return false;
   if (!namesLookCompatible(expectedName, resolved.name)) return false;
+  const categoryCompatible = categoryTypeCompatible(expectedCategory, resolved.types);
+  const categoryRelaxed = canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, resolved);
+  const broadPoiRelaxed = canRelaxBroadPoiCheck(expectedName, coords, expectedCategory, resolved);
 
   if (!phonesLookCompatible(expectedPhone, resolved.phone)) {
     logger.info("googlePlaces", "후보 제외: 전화번호 불일치", {
@@ -1241,8 +1279,9 @@ function validateResolvedIdentity(
     }
   }
   if (
-    !categoryTypeCompatible(expectedCategory, resolved.types) &&
-    !canRelaxCategoryTypeCheck(expectedName, coords, expectedCategory, resolved)
+    !categoryCompatible &&
+    !categoryRelaxed &&
+    !broadPoiRelaxed
   ) {
     logger.info("googlePlaces", "후보 제외: 상세 타입 불일치", {
       expected: expectedName,
@@ -1255,8 +1294,8 @@ function validateResolvedIdentity(
     expectedCategory &&
     expectedCategory !== "mall" &&
     categoryLooksLikeComplexOrBuilding(resolved.types ?? []) &&
-    !categoryTypeCompatible(expectedCategory, resolved.types) &&
-    !canRelaxBroadPoiCheck(expectedName, coords, expectedCategory, resolved)
+    !categoryCompatible &&
+    !broadPoiRelaxed
   ) {
     logger.info("googlePlaces", "후보 제외: 복합몰/건물 POI로 판단", {
       expected: expectedName,
@@ -1527,6 +1566,9 @@ async function fetchPlaceAtmosphere(
     menuForChildren?: boolean;
     goodForGroups?: boolean;
     restroom?: boolean;
+    liveMusic?: boolean;
+    outdoorSeating?: boolean;
+    servesCocktails?: boolean;
   };
 
   logger.info("placesNew", "✨ Places API (New) atmosphere 응답", {
@@ -1537,6 +1579,9 @@ async function fetchPlaceAtmosphere(
     menuForChildren: json.menuForChildren,
     goodForGroups: json.goodForGroups,
     restroom: json.restroom,
+    liveMusic: json.liveMusic,
+    outdoorSeating: json.outdoorSeating,
+    servesCocktails: json.servesCocktails,
   });
 
   return {
@@ -1545,6 +1590,9 @@ async function fetchPlaceAtmosphere(
     menuForChildren: json.menuForChildren,
     goodForGroups: json.goodForGroups,
     restroom: json.restroom,
+    liveMusic: json.liveMusic,
+    outdoorSeating: json.outdoorSeating,
+    servesCocktails: json.servesCocktails,
   };
 }
 
@@ -1558,47 +1606,70 @@ export async function getPlaceDetails(
   if (!GOOGLE_KEY) return null;
 
   const key = `${name}|${address ?? ""}|${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
+
+  // L1: 성공 캐시
   const cached = cache.get(key);
   if (cached && Date.now() < cached.expiresAt) return detailsFromCache(cached);
 
-  try {
-    const match = await resolvePlaceMatch(name, coords, address, phone, expectedCategory);
-    if (!match) {
-      logger.warn("googlePlaces", "검증 가능한 place_id를 찾지 못함", { name });
-      return null;
-    }
-
-    const placeId = match.placeId;
-    const details = match.details ?? await fetchPlaceDetails(placeId);
-    cache.set(key, {
-      placeId,
-      rating: details.rating,
-      reviewCount: details.reviewCount,
-      priceLevel: details.priceLevel,
-      photoUrl: details.photoUrl,
-      periods: details.hours?.periods ?? [],
-      hasParking: details.hasParking,
-      parkingSummary: details.parkingSummary,
-      goodForChildren: details.goodForChildren,
-      menuForChildren: details.menuForChildren,
-      goodForGroups: details.goodForGroups,
-      restroom: details.restroom,
-      expiresAt: Date.now() + CACHE_TTL_MS,
-    });
-    logger.info("googlePlaces", "기본 상세 보강 완료", {
-      name,
-      rating: details.rating ?? "-",
-      reviews: details.reviewCount ?? "-",
-      open: details.hours?.isOpenNow,
-    });
-    return details;
-  } catch (err) {
-    logger.error("googlePlaces", "기본 상세 보강 오류", {
-      name,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  // L2: 실패 캐시 — 매칭 실패 장소는 30분 재시도 차단
+  const failExpiry = matchFailureCache.get(key);
+  if (failExpiry && Date.now() < failExpiry) {
+    logger.info("googlePlaces", "🚫 실패 캐시 HIT - 재시도 생략", { name });
     return null;
   }
+
+  // 동시 중복 호출 방지 — 같은 장소 병렬 요청이 오면 첫 번째 결과를 공유
+  const inFlight = detailsInFlight.get(key);
+  if (inFlight) {
+    logger.info("googlePlaces", "⏳ 동일 장소 상세 조회 재사용", { name });
+    return inFlight;
+  }
+
+  const promise = (async (): Promise<PlaceDetails | null> => {
+    try {
+      const match = await resolvePlaceMatch(name, coords, address, phone, expectedCategory);
+      if (!match) {
+        matchFailureCache.set(key, Date.now() + MATCH_FAILURE_TTL_MS);
+        logger.warn("googlePlaces", "검증 가능한 place_id를 찾지 못함 (실패 캐시 저장)", { name });
+        return null;
+      }
+
+      const placeId = match.placeId;
+      const details = match.details ?? await fetchPlaceDetails(placeId);
+      cache.set(key, {
+        placeId,
+        rating: details.rating,
+        reviewCount: details.reviewCount,
+        priceLevel: details.priceLevel,
+        photoUrl: details.photoUrl,
+        periods: details.hours?.periods ?? [],
+        hasParking: details.hasParking,
+        parkingSummary: details.parkingSummary,
+        goodForChildren: details.goodForChildren,
+        menuForChildren: details.menuForChildren,
+        goodForGroups: details.goodForGroups,
+        restroom: details.restroom,
+        googleTypes: details.types,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
+      logger.info("googlePlaces", "기본 상세 보강 완료", {
+        name,
+        rating: details.rating ?? "-",
+        reviews: details.reviewCount ?? "-",
+        open: details.hours?.isOpenNow,
+      });
+      return details;
+    } catch (err) {
+      logger.error("googlePlaces", "기본 상세 보강 오류", {
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  })().finally(() => detailsInFlight.delete(key));
+
+  detailsInFlight.set(key, promise);
+  return promise;
 }
 
 export async function getPlaceAtmosphere(
@@ -1619,13 +1690,15 @@ export async function getPlaceAtmosphere(
   const alreadySatisfied =
     (!options.parking || cached?.parkingSummary !== undefined || cached?.hasParking !== undefined) &&
     (!options.children || cached?.goodForChildren !== undefined || cached?.menuForChildren !== undefined || cached?.restroom !== undefined) &&
-    (!options.groups || cached?.goodForGroups !== undefined);
+    (!options.groups || cached?.goodForGroups !== undefined) &&
+    (!options.date || cached?.liveMusic !== undefined || cached?.outdoorSeating !== undefined || cached?.servesCocktails !== undefined);
 
   if (cached && Date.now() < cached.expiresAt && alreadySatisfied) {
     const intentBadges = [
       options.children ? "🧒 아이동반" : null,
       options.parking ? "🚗 주차" : null,
       options.groups ? "👥 단체" : null,
+      options.date ? "💑 데이트" : null,
     ].filter(Boolean).join(" + ");
     logger.info("placesNew", "♻️ 캐시 HIT", {
       name,
@@ -1633,6 +1706,9 @@ export async function getPlaceAtmosphere(
       parking: cached.hasParking,
       goodForChildren: cached.goodForChildren,
       goodForGroups: cached.goodForGroups,
+      liveMusic: cached.liveMusic,
+      outdoorSeating: cached.outdoorSeating,
+      servesCocktails: cached.servesCocktails,
     });
     return {
       hasParking: cached.hasParking,
@@ -1641,6 +1717,9 @@ export async function getPlaceAtmosphere(
       menuForChildren: cached.menuForChildren,
       goodForGroups: cached.goodForGroups,
       restroom: cached.restroom,
+      liveMusic: cached.liveMusic,
+      outdoorSeating: cached.outdoorSeating,
+      servesCocktails: cached.servesCocktails,
     };
   }
 
@@ -1676,6 +1755,7 @@ export async function getPlaceAtmosphere(
       options.children ? "🧒 아이동반" : null,
       options.parking ? "🚗 주차" : null,
       options.groups ? "👥 단체" : null,
+      options.date ? "💑 데이트" : null,
     ].filter(Boolean).join(" + ");
     logger.info("placesNew", "조회 시작", {
       name,
@@ -1704,6 +1784,10 @@ export async function getPlaceAtmosphere(
         menuForChildren: placeScopedCached.details.menuForChildren ?? cached?.menuForChildren,
         goodForGroups: placeScopedCached.details.goodForGroups ?? cached?.goodForGroups,
         restroom: placeScopedCached.details.restroom ?? cached?.restroom,
+        liveMusic: placeScopedCached.details.liveMusic ?? cached?.liveMusic,
+        outdoorSeating: placeScopedCached.details.outdoorSeating ?? cached?.outdoorSeating,
+        servesCocktails: placeScopedCached.details.servesCocktails ?? cached?.servesCocktails,
+        googleTypes: cached?.googleTypes,
         expiresAt: Date.now() + CACHE_TTL_MS,
       };
       cache.set(key, mergedCache);
@@ -1742,6 +1826,10 @@ export async function getPlaceAtmosphere(
       menuForChildren: atmosphere.menuForChildren ?? cached?.menuForChildren,
       goodForGroups: atmosphere.goodForGroups ?? cached?.goodForGroups,
       restroom: atmosphere.restroom ?? cached?.restroom,
+      liveMusic: atmosphere.liveMusic ?? cached?.liveMusic,
+      outdoorSeating: atmosphere.outdoorSeating ?? cached?.outdoorSeating,
+      servesCocktails: atmosphere.servesCocktails ?? cached?.servesCocktails,
+      googleTypes: cached?.googleTypes,
       expiresAt: Date.now() + CACHE_TTL_MS,
     };
     cache.set(key, nextCache);
@@ -1754,6 +1842,9 @@ export async function getPlaceAtmosphere(
       menuForChildren: atmosphere.menuForChildren,
       goodForGroups: atmosphere.goodForGroups,
       restroom: atmosphere.restroom,
+      liveMusic: atmosphere.liveMusic,
+      outdoorSeating: atmosphere.outdoorSeating,
+      servesCocktails: atmosphere.servesCocktails,
     });
     return atmosphere;
   } catch (err) {

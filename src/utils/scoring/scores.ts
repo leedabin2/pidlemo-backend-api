@@ -76,8 +76,8 @@ export function companionScore(
       bar: 12, photo: -6, nature: -8, cinema: -4, activity: 0,
     },
     가족과: {
-      restaurant: 14, cafe: 8, popup: 4, exhibition: 8, park: 10, shopping: -8, mall: 14,
-      bar: -18, photo: 2, nature: 8, cinema: 8, activity: 6,
+      restaurant: 8, cafe: 4, popup: 2, exhibition: 4, park: 14, shopping: -10, mall: 4,
+      bar: -20, photo: 2, nature: 16, cinema: 6, activity: 14,
     },
   };
 
@@ -103,6 +103,17 @@ function companionPlaceHeuristicScore(place: Place, companion: CompanionPreferen
   if (companion === "데이트") {
     if (place.category === "cinema" && (slot === "afternoon" || slot === "evening" || slot === "night")) score += 8;
     if (place.category === "cafe" && place.googleRating && place.googleRating >= 4.3) score += 2;
+
+    // Google Types 기반 — 데이트에 어울리는 장소 유형
+    const gTypes = place.googleTypes ?? [];
+    if (gTypes.some((t) => ["cocktail_bar", "wine_bar"].includes(t))) score += 6;
+    if (gTypes.some((t) => ["art_gallery", "museum"].includes(t))) score += 4;
+    if (gTypes.includes("night_club")) score -= 4; // 클럽은 데이트보다 친구들과
+
+    // Places API (New) atmosphere — 데이트 분위기 신호
+    if (place.liveMusic) score += 6;
+    if (place.servesCocktails) score += 5;
+    if (place.outdoorSeating && (slot === "afternoon" || slot === "evening")) score += 3;
   }
 
   if (companion === "직장모임") {
