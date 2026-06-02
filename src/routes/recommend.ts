@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { ipRateLimit } from "../middleware/rateLimit";
 import { getWeather, getWeatherForecast } from "../services/weather";
-import { getNearByWellnessPlaces, getMockWellnessPlaces } from "../services/kakaoLocal";
+import { getNearByWellnessPlaces, getMockWellnessPlaces, findNearbyParking } from "../services/kakaoLocal";
 import { formatOperatingHoursLabel, getPlaceAtmosphere, getPlaceDetails, isOpenAtOffset } from "../services/googlePlaces";
 import { buildCourses, getWeatherCondition, scorePlace, type RecommendationOptions } from "../utils/scoring";
 import { PLACE_CATEGORY_ORDER, CATEGORY_TITLE } from "../constants/categories";
@@ -154,6 +154,7 @@ async function enrichWithGoogleDetails(places: Place[]): Promise<Place[]> {
 
 function shouldFetchAtmosphere(options: RecommendationOptions) {
   return (
+    options.transport === "차량" ||
     options.requireParking === true ||
     options.companion === "아이와 함께" ||
     options.requireChildFacilities === true ||
@@ -280,6 +281,9 @@ function pickAtmosphereTargets(places: Place[], options: RecommendationOptions):
     if (options.companion === "데이트") {
       return ["bar", "cafe", "restaurant", "exhibition", "park", "photo", "cinema"].indexOf(category);
     }
+    if (options.transport === "차량") {
+      return ["mall", "restaurant", "cinema", "activity", "cafe", "shopping"].indexOf(category);
+    }
     return 0;
   };
 
@@ -295,7 +299,7 @@ function pickAtmosphereTargets(places: Place[], options: RecommendationOptions):
       return a.walkingMinutes - b.walkingMinutes;
     });
 
-  const globalCap = options.companion === "아이와 함께" ? 20 : 12;
+  const globalCap = options.requireParking === true ? 25 : options.companion === "아이와 함께" ? 20 : 12;
   const addTop = (source: Place[], limit: number) => {
     let added = 0;
     for (const place of sortByAtmospherePriority(source)) {
@@ -310,6 +314,9 @@ function pickAtmosphereTargets(places: Place[], options: RecommendationOptions):
     }
   };
 
+  if (options.transport === "차량") {
+    addTop(byStage.filter((p) => ["restaurant", "cafe", "mall", "cinema", "activity", "shopping"].includes(p.category)), 4);
+  }
   if (options.companion === "아이와 함께") {
     // mall/park/cinema/nature → 카테고리 기본값으로 처리 (applyChildCategoryDefaults), API 불필요
     // restaurant/cafe/popup/activity/exhibition → 실제 여부 Google API로 확인
@@ -369,7 +376,7 @@ async function enrichWithGoogleAtmosphere(places: Place[], options: Recommendati
       const atmosphere = await getPlaceAtmosphere(
         place.name, place.coordinates,
         {
-          parking: options.requireParking === true,
+          parking: options.transport === "차량" || options.requireParking === true,
           children: options.companion === "아이와 함께" || options.requireChildFacilities === true || options.requireRestroom === true,
           groups: options.companion === "직장모임",
           date: options.companion === "데이트",
@@ -548,8 +555,8 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     let candidatePlaces = await enrichWithGoogleAtmosphere(filteredCandidatesBase, options);
     if (options.requireParking === true) {
       const before = candidatePlaces.length;
-      candidatePlaces = candidatePlaces.filter((p) => p.hasParking !== false);
-      logger.info("recommend", `🚗 주차 필수 필터 적용: ${before} → ${candidatePlaces.length}개`);
+      candidatePlaces = candidatePlaces.filter((p) => p.hasParking === true);
+      logger.info("recommend", `🚗 주차 필수 하드 필터: ${before} → ${candidatePlaces.length}개 (confirmed only)`);
     }
     if (options.companion === "아이와 함께") {
       candidatePlaces = applyChildCategoryDefaults(candidatePlaces);
@@ -602,13 +609,19 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       const popularCourse = buildCourses(scoredPopular, weather, hour, options, forecast);
       const best = popularCourse[0];
       if (best && !courses.some((c) => c.places.every((p, i) => p.id === best.places[i]?.id))) {
-        courses.unshift({
+        const popularCourseEntry = {
           ...best,
           id: "course-popular",
           title: "🔥 주변 인기 장소 코스",
           tags: mergeUniqueTags([POPULAR_CANDIDATE_TAG, "인기", ...best.tags]),
           isPopular: true,
-        });
+        };
+        // 주차 필수 모드: 인기 코스는 맨 뒤 (주차 확인된 코스 우선)
+        if (options.requireParking === true) {
+          courses.push(popularCourseEntry);
+        } else {
+          courses.unshift(popularCourseEntry);
+        }
       }
     }
 
@@ -628,6 +641,39 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     }
 
     const coursesWithSummary = courses.map((c, i) => ({ ...c, aiReason: summaries[i] || undefined }));
+
+    // ── 차량 이용 시: 주차 정보 없는 장소에 인근 주차장 태그 부착 ──
+    if (options.transport === "차량" && hasKakaoKey) {
+      const needsParking = new Map<string, Place>();
+      for (const course of coursesWithSummary) {
+        for (const place of course.places) {
+          if (place.hasParking !== true && !needsParking.has(place.id)) {
+            needsParking.set(place.id, place);
+          }
+        }
+      }
+      if (needsParking.size > 0) {
+        const parkingResults = await Promise.all(
+          [...needsParking.values()].map(async (place) => {
+            const nearby = await findNearbyParking(place.coordinates, 500);
+            return { id: place.id, nearby };
+          })
+        );
+        const parkingById = new Map(parkingResults.map(({ id, nearby }) => [id, nearby]));
+        for (const course of coursesWithSummary) {
+          for (const place of course.places) {
+            const nearby = parkingById.get(place.id);
+            if (nearby) {
+              place.nearbyParking = nearby;
+              place.tags = mergeUniqueTags([
+                ...place.tags,
+                `🅿️ 인근: ${nearby.name} (도보 ${nearby.walkingMinutes}분)`,
+              ]);
+            }
+          }
+        }
+      }
+    }
 
     const topPlaces = [...scoredPlaces]
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))

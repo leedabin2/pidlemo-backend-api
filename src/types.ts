@@ -43,6 +43,7 @@ export interface Place {
   liveMusic?: boolean;
   outdoorSeating?: boolean;
   servesCocktails?: boolean;
+  nearbyParking?: { name: string; walkingMinutes: number; coordinates: Coordinates };
   googleTypes?: string[];
   googleHours?: {
     isOpenNow: boolean;

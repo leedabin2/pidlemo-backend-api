@@ -15,6 +15,7 @@ import {
   getTourAttractions, getTourCulture, getTourFestivals,
   getMockAttractions, getMockFestivals,
 } from "./tourApi";
+import { logger } from "../utils/logger";
 
 export interface PlacePool {
   cafes: Place[]; restaurants: Place[]; shoppingPlaces: Place[]; mallPlaces: Place[];
@@ -79,6 +80,13 @@ export async function fetchPlacePool(
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
     hasKakaoKey ? getNearByActivityPlaces(coords, baseRadius) : Promise.resolve([]),
   ]);
+
+  logger.info("placePool", "Tour API 후보 풀 반영", {
+    enabled: hasTourKey ? "Y" : "N",
+    attractionsToPark: tourAttractions.length,
+    cultureToExhibition: tourCulture.length,
+    festivalsToPopup: tourFestivals.length,
+  });
 
   return {
     cafes, restaurants, shoppingPlaces, mallPlaces, kakaoParks,

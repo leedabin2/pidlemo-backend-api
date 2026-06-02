@@ -804,6 +804,26 @@ export function getMockShoppingPlaces(coords: Coordinates): Place[] {
   ];
 }
 
+export async function findNearbyParking(
+  coords: Coordinates,
+  radiusM = 500,
+): Promise<{ name: string; walkingMinutes: number; coordinates: Coordinates } | null> {
+  const docs = await searchByKeyword("주차장", coords, 5, radiusM);
+  const valid = docs
+    .filter((doc) => {
+      const dist = parseInt(doc.distance, 10);
+      return !isNaN(dist) && dist <= radiusM;
+    })
+    .sort((a, b) => parseInt(a.distance) - parseInt(b.distance));
+
+  if (!valid[0]) return null;
+  return {
+    name: valid[0].place_name,
+    walkingMinutes: calcWalkingMinutes(parseInt(valid[0].distance, 10)),
+    coordinates: { lat: parseFloat(valid[0].y), lng: parseFloat(valid[0].x) },
+  };
+}
+
 export function getMockMallPlaces(coords: Coordinates): Place[] {
   return [
     {

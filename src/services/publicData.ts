@@ -21,6 +21,24 @@ function cacheKey(coords: Coordinates): string {
   return `${coords.lat.toFixed(2)}_${coords.lng.toFixed(2)}`;
 }
 
+function summarizeErrorData(data: unknown): string {
+  if (data === undefined || data === null) return "-";
+  const text = typeof data === "string" ? data : JSON.stringify(data);
+  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
+function summarizeSeoulEvent(item: Record<string, string>): string {
+  return `${item.TITLE ?? "-"} | code=${item.CULTCODE ?? "-"} place=${item.PLACE ?? "-"} period=${item.STRTDATE ?? "?"}~${item.END_DATE ?? "?"} lat=${item.LAT ?? "-"} lng=${item.LOT ?? "-"}`;
+}
+
+function summarizeSeoulPark(item: Record<string, string>): string {
+  return `${item.PARK_NM ?? "-"} | id=${item.P_IDX ?? "-"} addr=${item.ADDR ?? "-"} lat=${item.LATITUDE ?? "-"} lng=${item.LONGITUDE ?? "-"}`;
+}
+
+function summarizePlace(place: Place): string {
+  return `${place.name} → category=${place.category} minutes=${place.walkingMinutes} address=${place.address || "-"}`;
+}
+
 function isTodayInRange(startDate: string, endDate: string): boolean {
   const now = new Date();
   const start = new Date(startDate.replace(/\./g, "-"));
@@ -30,107 +48,223 @@ function isTodayInRange(startDate: string, endDate: string): boolean {
 }
 
 export async function getNearByPopups(coords: Coordinates): Promise<Place[]> {
-  if (!API_KEY) return getMockPopups(coords);
+  if (!API_KEY) {
+    logger.info("publicData", "서울 문화행사 API 키 없음 → mock 사용");
+    return getMockPopups(coords);
+  }
 
   const key = cacheKey(coords);
   const cached = eventCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  if (cached && Date.now() < cached.expiresAt) {
+    logger.info("publicData", "서울 문화행사 캐시 HIT", { key, applied: cached.data.length });
+    return cached.data;
+  }
 
   try {
+    logger.info("publicData", "서울 문화행사 요청", {
+      endpoint: "culturalEventInfo",
+      rows: 100,
+      lat: coords.lat,
+      lng: coords.lng,
+    });
+
     const url = SEOUL_CULTURE_URL.replace("{API_KEY}", API_KEY);
     const { data } = await axios.get(url);
     const items = data?.culturalEventInfo?.row ?? [];
+    const resultInfo = data?.culturalEventInfo?.RESULT;
 
-    const result: Place[] = items
-      .filter((item: Record<string, string>) =>
-        isTodayInRange(item.STRTDATE, item.END_DATE)
-      )
-      .map((item: Record<string, string>, i: number) => {
-        const placeLat = parseFloat(item.LAT);
-        const placeLng = parseFloat(item.LOT);
-        if (!placeLat || !placeLng) return null;
+    logger.info("publicData", "서울 문화행사 응답", {
+      code: resultInfo?.CODE ?? "-",
+      message: resultInfo?.MESSAGE ?? "-",
+      totalCount: data?.culturalEventInfo?.list_total_count ?? items.length,
+      itemCount: items.length,
+    });
 
-        const placeCoords = { lat: placeLat, lng: placeLng };
-        const dist = haversineDistance(coords, placeCoords);
+    if (items.length > 0) {
+      logger.block(
+        "publicData",
+        "서울 문화행사 원본 샘플",
+        items.slice(0, 5).map((item: Record<string, string>) => summarizeSeoulEvent(item))
+      );
+    }
 
-        const today = new Date();
-        const endDate = new Date(item.END_DATE.replace(/\./g, "-"));
-        const daysLeft = Math.ceil(
-          (endDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-        );
+    let inactiveExcluded = 0;
+    let invalidCoordExcluded = 0;
+    let distanceExcluded = 0;
 
-        const tags: string[] = [];
-        if (daysLeft === 0) tags.push("오늘 마감");
-        else if (daysLeft <= 3) tags.push(`${daysLeft}일 남음`);
-        else tags.push("현재 진행중");
+    const candidates: Place[] = [];
+    items.forEach((item: Record<string, string>, i: number) => {
+      if (!isTodayInRange(item.STRTDATE, item.END_DATE)) {
+        inactiveExcluded += 1;
+        return;
+      }
 
-        return {
-          id: `popup-${item.CULTCODE ?? i}`,
-          name: item.TITLE,
-          category: "popup" as const,
-          coordinates: placeCoords,
-          address: item.PLACE ?? "",
-          walkingMinutes: calcWalkingMinutes(dist),
-          operatingHours: `${item.STRTDATE} ~ ${item.END_DATE}`,
-          isOpen: getOpenStateNow(`${item.STRTDATE} ~ ${item.END_DATE}`),
-          tags,
-          source: "public_data" as const,
-        };
-      })
-      .filter((p: Place | null): p is Place => p !== null && calcWalkingMinutes(haversineDistance(coords, p.coordinates)) <= 60)
+      const placeLat = parseFloat(item.LAT);
+      const placeLng = parseFloat(item.LOT);
+      if (!placeLat || !placeLng) {
+        invalidCoordExcluded += 1;
+        return;
+      }
+
+      const placeCoords = { lat: placeLat, lng: placeLng };
+      const dist = haversineDistance(coords, placeCoords);
+      const walkingMinutes = calcWalkingMinutes(dist);
+      if (walkingMinutes > 60) {
+        distanceExcluded += 1;
+        return;
+      }
+
+      const today = new Date();
+      const endDate = new Date(item.END_DATE.replace(/\./g, "-"));
+      const daysLeft = Math.ceil(
+        (endDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+      );
+
+      const tags: string[] = [];
+      if (daysLeft === 0) tags.push("오늘 마감");
+      else if (daysLeft <= 3) tags.push(`${daysLeft}일 남음`);
+      else tags.push("현재 진행중");
+
+      candidates.push({
+        id: `popup-${item.CULTCODE ?? i}`,
+        name: item.TITLE,
+        category: "popup" as const,
+        coordinates: placeCoords,
+        address: item.PLACE ?? "",
+        walkingMinutes,
+        operatingHours: `${item.STRTDATE} ~ ${item.END_DATE}`,
+        isOpen: getOpenStateNow(`${item.STRTDATE} ~ ${item.END_DATE}`),
+        tags,
+        source: "public_data" as const,
+      });
+    });
+
+    const result = candidates
       .sort((a: Place, b: Place) => a.walkingMinutes - b.walkingMinutes)
       .slice(0, 8);
+
+    logger.info("publicData", "서울 문화행사 적용 결과", {
+      raw: items.length,
+      inactiveExcluded,
+      invalidCoordExcluded,
+      distanceExcluded,
+      applied: result.length,
+    });
+    if (result.length > 0) {
+      logger.block("publicData", "서울 문화행사 최종 반영", result.slice(0, 8).map(summarizePlace));
+    }
 
     eventCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    logger.error("publicData", "행사 API 오류", { error: err instanceof Error ? err.message : String(err) });
+    const response = (err as { response?: { status?: number; data?: unknown } })?.response;
+    logger.error("publicData", "서울 문화행사 API 오류", {
+      status: response?.status ?? "unknown",
+      body: summarizeErrorData(response?.data),
+      error: err instanceof Error ? err.message : String(err),
+    });
     return getMockPopups(coords);
   }
 }
 
 export async function getNearByParks(coords: Coordinates): Promise<Place[]> {
-  if (!API_KEY) return getMockParks(coords);
+  if (!API_KEY) {
+    logger.info("publicData", "서울 공원 API 키 없음 → mock 사용");
+    return getMockParks(coords);
+  }
 
   const key = cacheKey(coords);
   const cached = parkCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  if (cached && Date.now() < cached.expiresAt) {
+    logger.info("publicData", "서울 공원 캐시 HIT", { key, applied: cached.data.length });
+    return cached.data;
+  }
 
   try {
+    logger.info("publicData", "서울 공원 요청", {
+      endpoint: "SearchParkInfoService",
+      rows: 30,
+      lat: coords.lat,
+      lng: coords.lng,
+    });
+
     const url = SEOUL_PARK_URL.replace("{API_KEY}", API_KEY);
     const { data } = await axios.get(url);
     const items = data?.SearchParkInfoService?.row ?? [];
+    const resultInfo = data?.SearchParkInfoService?.RESULT;
 
-    const result: Place[] = items
-      .map((item: Record<string, string>) => {
-        const parkLat = parseFloat(item.LATITUDE) || 0;
-        const parkLng = parseFloat(item.LONGITUDE) || 0;
-        if (!parkLat || !parkLng) return null;
+    logger.info("publicData", "서울 공원 응답", {
+      code: resultInfo?.CODE ?? "-",
+      message: resultInfo?.MESSAGE ?? "-",
+      totalCount: data?.SearchParkInfoService?.list_total_count ?? items.length,
+      itemCount: items.length,
+    });
 
-        const placeCoords = { lat: parkLat, lng: parkLng };
-        const dist = haversineDistance(coords, placeCoords);
+    if (items.length > 0) {
+      logger.block(
+        "publicData",
+        "서울 공원 원본 샘플",
+        items.slice(0, 5).map((item: Record<string, string>) => summarizeSeoulPark(item))
+      );
+    }
 
-        return {
-          id: `park-${item.P_IDX ?? item.PARK_NM}`,
-          name: item.PARK_NM,
-          category: "park" as const,
-          coordinates: placeCoords,
-          address: item.ADDR ?? "",
-          walkingMinutes: calcWalkingMinutes(dist),
-          operatingHours: "24시간",
-          isOpen: getOpenStateNow("24시간"),
-          tags: ["야외"],
-          source: "public_data" as const,
-        };
-      })
-      .filter((p: Place | null): p is Place => p !== null && p.walkingMinutes <= 30)
+    let invalidCoordExcluded = 0;
+    let distanceExcluded = 0;
+
+    const candidates: Place[] = [];
+    items.forEach((item: Record<string, string>) => {
+      const parkLat = parseFloat(item.LATITUDE) || 0;
+      const parkLng = parseFloat(item.LONGITUDE) || 0;
+      if (!parkLat || !parkLng) {
+        invalidCoordExcluded += 1;
+        return;
+      }
+
+      const placeCoords = { lat: parkLat, lng: parkLng };
+      const dist = haversineDistance(coords, placeCoords);
+      const walkingMinutes = calcWalkingMinutes(dist);
+      if (walkingMinutes > 30) {
+        distanceExcluded += 1;
+        return;
+      }
+
+      candidates.push({
+        id: `park-${item.P_IDX ?? item.PARK_NM}`,
+        name: item.PARK_NM,
+        category: "park" as const,
+        coordinates: placeCoords,
+        address: item.ADDR ?? "",
+        walkingMinutes,
+        operatingHours: "24시간",
+        isOpen: getOpenStateNow("24시간"),
+        tags: ["야외"],
+        source: "public_data" as const,
+      });
+    });
+
+    const result = candidates
       .sort((a: Place, b: Place) => a.walkingMinutes - b.walkingMinutes)
       .slice(0, 8);
+
+    logger.info("publicData", "서울 공원 적용 결과", {
+      raw: items.length,
+      invalidCoordExcluded,
+      distanceExcluded,
+      applied: result.length,
+    });
+    if (result.length > 0) {
+      logger.block("publicData", "서울 공원 최종 반영", result.slice(0, 8).map(summarizePlace));
+    }
 
     parkCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
-    logger.error("publicData", "공원 API 오류", { error: err instanceof Error ? err.message : String(err) });
+    const response = (err as { response?: { status?: number; data?: unknown } })?.response;
+    logger.error("publicData", "서울 공원 API 오류", {
+      status: response?.status ?? "unknown",
+      body: summarizeErrorData(response?.data),
+      error: err instanceof Error ? err.message : String(err),
+    });
     return getMockParks(coords);
   }
 }

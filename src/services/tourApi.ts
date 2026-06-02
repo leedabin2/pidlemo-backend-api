@@ -49,6 +49,30 @@ interface TourItem {
   firstimage?: string;
 }
 
+function contentTypeLabel(contentTypeId: string): string {
+  if (contentTypeId === CONTENT_TYPE.tourist) return "관광지/공원";
+  if (contentTypeId === CONTENT_TYPE.culture) return "문화시설/전시";
+  if (contentTypeId === CONTENT_TYPE.festival) return "축제/행사";
+  return "알 수 없음";
+}
+
+function summarizeTourItem(item: TourItem): string {
+  const eventPeriod = item.eventstartdate || item.eventenddate
+    ? ` period=${item.eventstartdate ?? "?"}~${item.eventenddate ?? "?"}`
+    : "";
+  return `${item.title} | id=${item.contentid} addr=${item.addr1 || "-"} dist=${item.dist || "-"}m${eventPeriod}`;
+}
+
+function summarizePlace(place: Place): string {
+  return `${place.name} → category=${place.category} minutes=${place.walkingMinutes} address=${place.address || "-"}`;
+}
+
+function summarizeErrorData(data: unknown): string {
+  if (data === undefined || data === null) return "-";
+  const text = typeof data === "string" ? data : JSON.stringify(data);
+  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
 async function fetchLocationBased(
   coords: Coordinates,
   contentTypeId: string,
@@ -58,6 +82,15 @@ async function fetchLocationBased(
   if (!API_KEY) return [];
 
   try {
+    logger.info("tourApi", "locationBasedList1 요청", {
+      contentTypeId,
+      type: contentTypeLabel(contentTypeId),
+      radius,
+      numOfRows,
+      lat: coords.lat,
+      lng: coords.lng,
+    });
+
     const { data } = await axios.get(`${BASE_URL}/locationBasedList1`, {
       params: {
         serviceKey: API_KEY,
@@ -74,15 +107,41 @@ async function fetchLocationBased(
       },
     });
 
+    const header = data?.response?.header;
+    const body = data?.response?.body;
     const items = data?.response?.body?.items?.item;
+    const normalized = !items ? [] : Array.isArray(items) ? items : [items];
+
+    logger.info("tourApi", "locationBasedList1 응답", {
+      contentTypeId,
+      type: contentTypeLabel(contentTypeId),
+      resultCode: header?.resultCode ?? "-",
+      resultMsg: header?.resultMsg ?? "-",
+      totalCount: body?.totalCount ?? 0,
+      itemCount: normalized.length,
+    });
+
+    if (normalized.length > 0) {
+      logger.block(
+        "tourApi",
+        `원본 응답 샘플 contentTypeId=${contentTypeId}`,
+        normalized.slice(0, 5).map(summarizeTourItem)
+      );
+    }
+
     if (!items) {
-      logger.info("tourApi", "응답 비어있음", { contentTypeId });
+      logger.info("tourApi", "응답 비어있음", { contentTypeId, type: contentTypeLabel(contentTypeId) });
       return [];
     }
-    return Array.isArray(items) ? items : [items];
+    return normalized;
   } catch (err: unknown) {
-    const status = (err as { response?: { status?: number } })?.response?.status;
-    logger.error("tourApi", "locationBasedList1 오류", { contentTypeId, status: status ?? "unknown" });
+    const response = (err as { response?: { status?: number; data?: unknown } })?.response;
+    logger.error("tourApi", "locationBasedList1 오류", {
+      contentTypeId,
+      type: contentTypeLabel(contentTypeId),
+      status: response?.status ?? "unknown",
+      body: summarizeErrorData(response?.data),
+    });
     return [];
   }
 }
@@ -116,10 +175,16 @@ function getEventTags(endDate?: string): string[] {
 export async function getTourAttractions(coords: Coordinates): Promise<Place[]> {
   const key = cacheKey(coords);
   const cached = attractionCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  if (cached && Date.now() < cached.expiresAt) {
+    logger.info("tourApi", "관광지 캐시 HIT", { key, applied: cached.data.length });
+    return cached.data;
+  }
 
   try {
     const items = await fetchLocationBased(coords, CONTENT_TYPE.tourist, 3000, 14);
+    const excluded = items.filter((item) =>
+      ATTRACTION_EXCLUDE_KW.some((kw) => item.title.includes(kw))
+    );
     const result = items.filter((item) =>
       !ATTRACTION_EXCLUDE_KW.some((kw) => item.title.includes(kw))
     ).map((item) => {
@@ -143,6 +208,17 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
         source: "public_data" as const,
       };
     });
+    logger.info("tourApi", "관광지 적용 결과", {
+      raw: items.length,
+      excluded: excluded.length,
+      applied: result.length,
+    });
+    if (excluded.length > 0) {
+      logger.list("tourApi", "관광지 제외", excluded.map((item) => `${item.title}(키즈/어린이 계열)`), 10);
+    }
+    if (result.length > 0) {
+      logger.block("tourApi", "관광지 최종 반영", result.slice(0, 8).map(summarizePlace));
+    }
     attractionCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
@@ -155,7 +231,10 @@ export async function getTourAttractions(coords: Coordinates): Promise<Place[]> 
 export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
   const key = cacheKey(coords);
   const cached = cultureCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  if (cached && Date.now() < cached.expiresAt) {
+    logger.info("tourApi", "문화시설 캐시 HIT", { key, applied: cached.data.length });
+    return cached.data;
+  }
 
   try {
     const items = await fetchLocationBased(coords, CONTENT_TYPE.culture, 3000, 14);
@@ -180,6 +259,13 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
         source: "public_data" as const,
       };
     });
+    logger.info("tourApi", "문화시설 적용 결과", {
+      raw: items.length,
+      applied: result.length,
+    });
+    if (result.length > 0) {
+      logger.block("tourApi", "문화시설 최종 반영", result.slice(0, 8).map(summarizePlace));
+    }
     cultureCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
@@ -192,17 +278,23 @@ export async function getTourCulture(coords: Coordinates): Promise<Place[]> {
 export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
   const key = cacheKey(coords);
   const cached = festivalCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  if (cached && Date.now() < cached.expiresAt) {
+    logger.info("tourApi", "행사 캐시 HIT", { key, applied: cached.data.length });
+    return cached.data;
+  }
 
   try {
     const items = await fetchFestivals(coords, 5000);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    let keywordExcluded = 0;
+    let expiredExcluded = 0;
 
     const result = items
       .map((item) => {
         const searchableText = `${item.title ?? ""} ${item.addr1 ?? ""}`.toLowerCase();
         if (EVENT_EXCLUDE_TEXT_KW.some((kw) => searchableText.includes(kw.toLowerCase()))) {
+          keywordExcluded += 1;
           return null;
         }
 
@@ -219,7 +311,10 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
           const endStr = item.eventenddate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
           const endDate = new Date(endStr);
           endDate.setHours(23, 59, 59);
-          if (endDate < today) return null;
+          if (endDate < today) {
+            expiredExcluded += 1;
+            return null;
+          }
         }
 
         const tags = getEventTags(item.eventenddate);
@@ -247,6 +342,15 @@ export async function getTourFestivals(coords: Coordinates): Promise<Place[]> {
       })
       .filter((p): p is NonNullable<typeof p> => p !== null) as Place[];
 
+    logger.info("tourApi", "행사 적용 결과", {
+      raw: items.length,
+      keywordExcluded,
+      expiredExcluded,
+      applied: result.length,
+    });
+    if (result.length > 0) {
+      logger.block("tourApi", "행사 최종 반영", result.slice(0, 8).map(summarizePlace));
+    }
     festivalCache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return result;
   } catch (err) {
