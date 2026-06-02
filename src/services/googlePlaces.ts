@@ -129,6 +129,7 @@ interface NewApiCandidate {
   formattedAddress?: string;
   location?: { latitude: number; longitude: number };
   types?: string[];
+  businessStatus?: string;
 }
 
 interface FindPlaceCandidate {
@@ -867,28 +868,16 @@ async function findPlaceIdScored(
 ): Promise<ScoredCandidate[]> {
   if (!GOOGLE_KEY) return [];
 
-  // 1차: 이름+주소 Text Search, 100m locationBias
-  const query = address ? `${name} ${address}` : name;
-  let candidates = await textSearchNewApi(query, coords, 100);
+  const candidates = await nearbySearchNewApi(coords, 150, googleTypesForCategory(expectedCategory));
 
-  // 후보 부족 시 이름만으로 200m 확장
-  if (candidates.length < 2) {
-    const more = await textSearchNewApi(name, coords, 200);
-    const seen = new Set(candidates.map((c) => c.id));
-    candidates = [...candidates, ...more.filter((c) => !seen.has(c.id))];
-  }
+  const active = candidates.filter((c) => c.businessStatus !== "CLOSED_PERMANENTLY");
 
-  // 2차: Nearby Search fallback
-  if (candidates.length === 0) {
-    candidates = await nearbySearchNewApi(coords, 150, googleTypesForCategory(expectedCategory));
-  }
-
-  if (candidates.length === 0) {
+  if (active.length === 0) {
     logger.warn("googlePlaces", "place_id를 찾지 못함 (후보 없음)", { name });
     return [];
   }
 
-  const scored = candidates
+  const scored = active
     .map((c) => ({
       id: c.id,
       displayName: c.displayName?.text ?? "",
@@ -902,21 +891,17 @@ async function findPlaceIdScored(
       formattedAddress: c.formattedAddress,
       types: c.types,
     }))
-    .filter((candidate) => {
-      if (!isTenantLikeCategory(expectedCategory)) return true;
-      return namesLookCompatible(name, candidate.displayName);
-    })
     .map((c) => ({
       ...c,
       baseScore: c.distanceScore + c.nameScore + c.addressScore + c.categoryScore,
     }))
-    .sort((a, b) => b.baseScore - a.baseScore);
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
-  logger.info("googlePlaces", "매칭 점수", {
+  logger.info("googlePlaces", "좌표 기반 매칭", {
     name,
     top: scored
-      .slice(0, 5)
-      .map((s) => `${s.displayName}(${s.baseScore}점/${Math.round(s.distanceMeters)}m)`)
+      .slice(0, 3)
+      .map((s) => `${s.displayName}(${Math.round(s.distanceMeters)}m)`)
       .join(" | "),
   });
   return scored;
@@ -1116,117 +1101,23 @@ async function resolvePlaceMatch(
   phone?: string,
   expectedCategory?: PlaceCategory,
 ): Promise<MatchResolution | null> {
-  const kakaoStructuredAddress = await fetchKakaoStructuredAddress(coords, address);
-  const scoredCandidates = await findPlaceIdScored(name, coords, address, expectedCategory);
-  let hadNewApiCandidates = scoredCandidates.length > 0;
-  let evaluated: Array<MatchResolution & { valid: boolean }> = [];
+  const candidates = await findPlaceIdScored(name, coords, address, expectedCategory);
+  if (candidates.length === 0) return null;
 
-  if (scoredCandidates.length > 0) {
-    const topCandidates = scoredCandidates.slice(0, 3);
+  const top = candidates[0];
+  const details = await fetchPlaceDetails(top.id);
 
-    for (const candidate of topCandidates) {
-      const details = await fetchPlaceDetails(candidate.id);
-      const valid = validateResolvedIdentity(name, coords, address, kakaoStructuredAddress, phone, expectedCategory, {
-        name: details.resolvedName,
-        formattedAddress: details.resolvedAddress,
-        phone: details.resolvedPhone,
-        types: details.types,
-        coords: details.resolvedCoords,
-        structuredAddress: details.resolvedStructuredAddress,
-      });
-      const score = calcResolutionScore(
-        candidate,
-        details,
-        name,
-        coords,
-        address,
-        kakaoStructuredAddress,
-        phone,
-        expectedCategory,
-      );
-
-      evaluated.push({
-        placeId: candidate.id,
-        score,
-        candidateName: details.resolvedName ?? candidate.displayName,
-        details,
-        valid,
-      });
-    }
-
-    evaluated.sort((a, b) => b.score - a.score);
-    const bestValid = evaluated.find((item) => item.valid);
-
-    logger.info("googlePlaces", "후보 추가 검증", {
-      name,
-      top: evaluated
-        .map((item) => `${item.candidateName}(${item.score}점${item.valid ? "" : "/invalid"})`)
-        .join(" | "),
-    });
-
-    if (bestValid?.score && bestValid.score >= 90) {
-      logger.info("googlePlaces", "자동 매칭 성공", {
-        name,
-        matched: bestValid.candidateName,
-        score: bestValid.score,
-      });
-      return bestValid;
-    }
-
-    if (bestValid?.score && bestValid.score >= 75) {
-      logger.warn("googlePlaces", "조건부 매칭 (75~89점)", {
-        name,
-        matched: bestValid.candidateName,
-        score: bestValid.score,
-      });
-      return bestValid;
-    }
-
-    logger.warn("googlePlaces", "점수 기반 매칭 실패 (<75점)", {
-      name,
-      best: bestValid ? `${bestValid.candidateName}(${bestValid.score}점)` : "none",
-    });
-  }
-
-  if (hadNewApiCandidates) {
-    if (shouldTryLegacyFallbackForTenant(name, coords, expectedCategory, evaluated)) {
-      logger.warn("googlePlaces", "legacy fallback 재허용", {
-        name,
-        reason: "복합몰 입점 매장 후보가 broad POI 위주로 판단됨",
-      });
-    } else {
-    logger.warn("googlePlaces", "legacy fallback 생략", {
-      name,
-      reason: "New API 후보는 있었지만 점수 기준 미달",
-    });
-    return null;
-    }
-  }
-
-  const fallbackId = await findPlaceId(name, coords, address, phone);
-  if (!fallbackId) return null;
-  const fallbackDetails = await fetchPlaceDetails(fallbackId);
-  if (!validateResolvedIdentity(name, coords, address, kakaoStructuredAddress, phone, expectedCategory, {
-    name: fallbackDetails.resolvedName,
-    formattedAddress: fallbackDetails.resolvedAddress,
-    phone: fallbackDetails.resolvedPhone,
-    types: fallbackDetails.types,
-    coords: fallbackDetails.resolvedCoords,
-    structuredAddress: fallbackDetails.resolvedStructuredAddress,
-  })) {
-    logger.warn("googlePlaces", "legacy fallback 검증 실패", { name, placeId: fallbackId });
-    return null;
-  }
-
-  logger.warn("googlePlaces", "legacy fallback 매칭 사용", {
+  logger.info("googlePlaces", "좌표 기반 매칭 결정", {
     name,
-    matched: fallbackDetails.resolvedName ?? fallbackId,
+    matched: details.resolvedName ?? top.displayName,
+    distanceMeters: Math.round(top.distanceMeters),
   });
+
   return {
-    placeId: fallbackId,
-    score: 0,
-    candidateName: fallbackDetails.resolvedName ?? fallbackId,
-    details: fallbackDetails,
+    placeId: top.id,
+    score: top.distanceMeters <= 50 ? 100 : top.distanceMeters <= 150 ? 80 : 60,
+    candidateName: details.resolvedName ?? top.displayName,
+    details,
   };
 }
 
