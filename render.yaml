@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: pidlemo-backend
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: OPENWEATHER_API_KEY
+        sync: false
+      - key: KAKAO_REST_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: GOOGLE_ROUTES_API_KEY
+        sync: false
+      - key: PUBLIC_DATA_API_KEY
+        sync: false
+      - key: TOUR_API_KEY
+        sync: false
+      - key: TMAP_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: RATE_LIMIT_PER_DAY
+        value: 5
