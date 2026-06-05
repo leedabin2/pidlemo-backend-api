@@ -438,7 +438,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     return;
   }
 
-  const hour = new Date().getHours();
+  const hour = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" })).getHours();
   const seoul = isSeoul(coords);
   const options: RecommendationOptions = {
     selectedCategories: parseCategories(req.query.categories),
