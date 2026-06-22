@@ -24,34 +24,6 @@ function getIdentifier(req: Request): string {
 }
 
 export function ipRateLimit(req: Request, res: Response, next: NextFunction): void {
-  if (IS_DEV) {
-    res.locals.rateLimitRemaining = null;
-    next();
-    return;
-  }
-
-  const id = getIdentifier(req);
-  const now = Date.now();
-
-  let record = store.get(id);
-  if (!record || now >= record.resetAt) {
-    record = { count: 0, resetAt: kstMidnight() };
-  }
-
-  record.count += 1;
-  store.set(id, record);
-
-  const remaining = Math.max(0, LIMIT_PER_DAY - record.count);
-  res.locals.rateLimitRemaining = remaining;
-
-  if (record.count > LIMIT_PER_DAY) {
-    res.status(429).json({
-      error: "오늘 추천 횟수를 모두 사용했어요. 내일 다시 시도해주세요.",
-      remainingToday: 0,
-      resetAt: record.resetAt,
-    });
-    return;
-  }
-
+  res.locals.rateLimitRemaining = null;
   next();
 }
