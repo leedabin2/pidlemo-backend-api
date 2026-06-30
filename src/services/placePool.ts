@@ -15,7 +15,27 @@ import {
   getTourAttractions, getTourCulture, getTourFestivals,
   getMockAttractions, getMockFestivals,
 } from "./tourApi";
+import { getNearByNaverPopups, getRegionName } from "./naverSearch";
+import { getClaudePopups } from "./popupClaude";
 import { logger } from "../utils/logger";
+
+// 팝업 수집: Claude(web_search + 캐시) 우선, 실패/예산초과/미설정 시 Naver fallback
+async function fetchPopups(coords: Coordinates): Promise<Place[]> {
+  if (!hasNaverKey && !process.env.ANTHROPIC_API_KEY) return [];
+  let regionLabel = "서울";
+  try {
+    const r = await getRegionName(coords);
+    regionLabel = [r.region2, r.region3].filter(Boolean).join(" ") || regionLabel;
+  } catch {
+    // region 조회 실패해도 좌표만으로 진행
+  }
+  const claude = await getClaudePopups(coords, regionLabel);
+  if (claude !== null) return claude;
+  if (hasNaverKey) return getNearByNaverPopups(coords);
+  return [];
+}
+
+const hasNaverKey = !!(process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET);
 
 export interface PlacePool {
   cafes: Place[]; restaurants: Place[]; shoppingPlaces: Place[]; mallPlaces: Place[];
@@ -25,6 +45,7 @@ export interface PlacePool {
   tourAttractions: Place[]; tourCulture: Place[]; tourFestivals: Place[];
   seoulPopups: Place[]; seoulParks: Place[];
   activityPlaces: Place[];
+  naverPopups: Place[];
 }
 
 const placePoolCache = new Map<string, { pool: PlacePool; expiresAt: number }>();
@@ -59,6 +80,7 @@ export async function fetchPlacePool(
     kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
     tourAttractions, tourCulture, tourFestivals,
     seoulPopups, seoulParks, activityPlaces,
+    naverPopups,
   ] = await Promise.all([
     hasKakaoKey ? getNearByCafes(coords, baseRadius) : Promise.resolve(getMockCafes(coords)),
     hasKakaoKey ? getNearByRestaurants(coords, baseRadius) : Promise.resolve([]),
@@ -79,6 +101,7 @@ export async function fetchPlacePool(
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
     hasKakaoKey ? getNearByActivityPlaces(coords, baseRadius) : Promise.resolve([]),
+    fetchPopups(coords),
   ]);
 
   logger.info("placePool", "Tour API 후보 풀 반영", {
@@ -94,5 +117,6 @@ export async function fetchPlacePool(
     kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
     tourAttractions, tourCulture, tourFestivals,
     seoulPopups, seoulParks, activityPlaces,
+    naverPopups,
   };
 }

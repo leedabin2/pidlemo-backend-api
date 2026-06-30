@@ -1106,17 +1106,27 @@ async function resolvePlaceMatch(
 
   const top = candidates[0];
   const details = await fetchPlaceDetails(top.id);
+  const resolvedName = details.resolvedName ?? top.displayName;
+
+  if (!namesLookCompatible(name, resolvedName)) {
+    logger.info("googlePlaces", "좌표 기반 매칭 거부: 이름 불일치", {
+      name,
+      matched: resolvedName,
+      distanceMeters: Math.round(top.distanceMeters),
+    });
+    return null;
+  }
 
   logger.info("googlePlaces", "좌표 기반 매칭 결정", {
     name,
-    matched: details.resolvedName ?? top.displayName,
+    matched: resolvedName,
     distanceMeters: Math.round(top.distanceMeters),
   });
 
   return {
     placeId: top.id,
     score: top.distanceMeters <= 50 ? 100 : top.distanceMeters <= 150 ? 80 : 60,
-    candidateName: details.resolvedName ?? top.displayName,
+    candidateName: resolvedName,
     details,
   };
 }

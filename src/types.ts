@@ -29,6 +29,10 @@ export interface Place {
   source: "kakao" | "public_data";
   kakaoMapUrl?: string;
   score?: number;
+  // 팝업/전시 등 시작 전 — 장소탭에는 노출하지만 코스 추천에는 제외
+  isUpcoming?: boolean;
+  // 운영기간이 자체 검증되지 않아 사용자가 직접 확인해야 하는 경우 참조 블로그 링크
+  sourceBlogUrl?: string;
   // Google Places 보강 정보
   googleRating?: number;          // 1.0 ~ 5.0
   googleReviewCount?: number;     // 리뷰 수

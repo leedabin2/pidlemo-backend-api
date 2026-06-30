@@ -7,7 +7,6 @@ import { formatOperatingHoursLabel, getPlaceAtmosphere, getPlaceDetails, isOpenA
 import { buildCourses, getWeatherCondition, scorePlace, type RecommendationOptions } from "../utils/scoring";
 import { PLACE_CATEGORY_ORDER, CATEGORY_TITLE } from "../constants/categories";
 import { isSeoul, isKorea, deduplicatePlaces } from "../utils/region";
-import { generateCourseSummaries } from "../services/aiSummary";
 import { diffQuotaUsage, getQuotaUsageSnapshot, logQuotaUsageSnapshot } from "../services/quotaTracker";
 import { logger } from "../utils/logger";
 import { poolKey, getCachedPool, setCachedPool, fetchPlacePool } from "../services/placePool";
@@ -413,15 +412,6 @@ async function enrichWithGoogleAtmosphere(places: Place[], options: Recommendati
 
   return places.map((place) => byId.get(place.id) ?? place);
 }
-// ── Layer 2: AI 요약 캐시 (4시간) ─────────────────────────────────
-const aiSummaryCache = new Map<string, { summaries: string[]; expiresAt: number }>();
-const AI_TTL_MS = 4 * 60 * 60 * 1000;
-
-function aiKey(courses: import("../types").Course[], slot: string, condition: string): string {
-  const ids = courses.map((c) => c.places.map((p) => p.id).join("+")).join("|");
-  return `${ids}__${slot}__${condition}`;
-}
-
 router.get("/", ipRateLimit, async (req: Request, res: Response) => {
   const lat = parseFloat(req.query.lat as string);
   const lng = parseFloat(req.query.lng as string);
@@ -488,6 +478,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       kakaoPopups, popularPlaces, kakaoTouristSpots, kakaoCultureVenues,
       tourAttractions, tourCulture, tourFestivals,
       seoulPopups, seoulParks, activityPlaces,
+      naverPopups,
     } = pool;
 
     logger.info("recommend", "날씨 요약", {
@@ -495,7 +486,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       feelsLike: `${weather.feelsLike}°C`, condition: getWeatherCondition(weather),
     });
 
-    const primaryPopups = deduplicatePlaces([...seoulPopups, ...tourFestivals]);
+    const primaryPopups = deduplicatePlaces([...seoulPopups, ...tourFestivals, ...naverPopups]);
     const rawPopups = preferPrimaryPlaces(primaryPopups, kakaoPopups, 10);
     const rawParks = deduplicatePlaces([...kakaoParks, ...tourAttractions, ...seoulParks, ...kakaoTouristSpots]);
     const curatedCulture = preferPrimaryPlaces(tourCulture, kakaoCultureVenues, 10);
@@ -514,7 +505,7 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
     logger.info("recommend", "원천 수집 요약", {
       cafe: cafes.length, restaurant: restaurants.length,
       shopping: shoppingPlaces.length, mall: mallPlaces.length,
-      popup: `${rawPopups.length}(공공${primaryPopups.length}/카카오${kakaoPopups.length})`,
+      popup: `${rawPopups.length}(공공${seoulPopups.length}/투어${tourFestivals.length}/네이버${naverPopups.length}/카카오${kakaoPopups.length})`,
       park: rawParks.length, exhibition: curatedCulture.length,
       photo: photoBooths.length, bar: bars.length,
       nature: naturePlaces.length, cinema: cinemas.length, activity: activityPlaces.length,
@@ -590,15 +581,19 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       },
     };
     const scoredPlaces = candidatePlaces.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
+    // 코스 추천: 오늘 운영중인 곳만 (시작 전인 팝업 제외). 장소탭(topPlaces/placeGroups)에는 포함.
+    const coursePoolPlaces = scoredPlaces.filter((p) => !(p.category === "popup" && p.isUpcoming));
 
-    let courses = buildCourses(scoredPlaces, weather, hour, options, forecast);
+    let courses = buildCourses(coursePoolPlaces, weather, hour, options, forecast);
     let categoryFallback = false;
     if (courses.length === 0 && selectedCats.length >= 1) {
       logger.info("recommend", "선택 카테고리 코스 없음 → 전체 카테고리 fallback");
       categoryFallback = true;
       const enrichedMap = new Map(candidatePlaces.map((p) => [p.id, p]));
       const fallbackCandidates = candidatePlacesBase.map((p) => enrichedMap.get(p.id) ?? p);
-      const fallbackScored = fallbackCandidates.map((p) => ({ ...p, score: scorePlace(p, ctx) }));
+      const fallbackScored = fallbackCandidates
+        .filter((p) => !(p.category === "popup" && p.isUpcoming))
+        .map((p) => ({ ...p, score: scorePlace(p, ctx) }));
       courses = buildCourses(fallbackScored, weather, hour, options, forecast);
     }
 
@@ -625,22 +620,8 @@ router.get("/", ipRateLimit, async (req: Request, res: Response) => {
       }
     }
 
-    // ── Layer 2: AI 요약 캐시 ─────────────────────────────────────
-    const condition = getWeatherCondition(weather, options.weatherAware);
-    const slot = hour < 6 ? "dawn" : hour < 11 ? "morning" : hour < 14 ? "lunch" : hour < 17 ? "afternoon" : hour < 21 ? "evening" : "night";
-    const aKey = aiKey(courses, slot, condition);
-    const cachedAi = aiSummaryCache.get(aKey);
-
-    let summaries: string[];
-    if (cachedAi && Date.now() < cachedAi.expiresAt) {
-      logger.info("recommend", "AI 요약 캐시 HIT");
-      summaries = cachedAi.summaries;
-    } else {
-      summaries = await generateCourseSummaries(courses, weather, hour);
-      aiSummaryCache.set(aKey, { summaries, expiresAt: Date.now() + AI_TTL_MS });
-    }
-
-    const coursesWithSummary = courses.map((c, i) => ({ ...c, aiReason: summaries[i] || undefined }));
+    // AI 요약 제거 (코스 reason 생성용 Claude 호출 비활성화) — 비용 절감을 위해 팝업 수집기에만 Claude 사용
+    const coursesWithSummary = courses;
 
     // ── 차량 이용 시: 주차 정보 없는 장소에 인근 주차장 태그 부착 ──
     if (options.transport === "차량" && hasKakaoKey) {
