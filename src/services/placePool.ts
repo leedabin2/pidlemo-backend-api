@@ -15,21 +15,14 @@ import {
   getTourAttractions, getTourCulture, getTourFestivals,
   getMockAttractions, getMockFestivals,
 } from "./tourApi";
-import { getNearByNaverPopups, getRegionName } from "./naverSearch";
+import { getNearByNaverPopups } from "./naverSearch";
 import { getClaudePopups } from "./popupClaude";
 import { logger } from "../utils/logger";
 
-// 팝업 수집: Claude(web_search + 캐시) 우선, 실패/예산초과/미설정 시 Naver fallback
-async function fetchPopups(coords: Coordinates): Promise<Place[]> {
+// 팝업 수집: Claude(지역 캐시 + 거리 필터) 우선, 실패/예산초과/미설정 시 Naver fallback
+async function fetchPopups(coords: Coordinates, radiusMeters: number): Promise<Place[]> {
   if (!hasNaverKey && !process.env.ANTHROPIC_API_KEY) return [];
-  let regionLabel = "서울";
-  try {
-    const r = await getRegionName(coords);
-    regionLabel = [r.region2, r.region3].filter(Boolean).join(" ") || regionLabel;
-  } catch {
-    // region 조회 실패해도 좌표만으로 진행
-  }
-  const claude = await getClaudePopups(coords, regionLabel);
+  const claude = await getClaudePopups(coords, radiusMeters);
   if (claude !== null) return claude;
   if (hasNaverKey) return getNearByNaverPopups(coords);
   return [];
@@ -101,7 +94,7 @@ export async function fetchPlacePool(
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulPopups(coords) : Promise.resolve(seoul ? getSeoulMockPopups(coords) : []),
     seoul && process.env.PUBLIC_DATA_API_KEY ? getSeoulParks(coords) : Promise.resolve(seoul ? getSeoulMockParks(coords) : []),
     hasKakaoKey ? getNearByActivityPlaces(coords, baseRadius) : Promise.resolve([]),
-    fetchPopups(coords),
+    fetchPopups(coords, baseRadius),
   ]);
 
   logger.info("placePool", "Tour API 후보 풀 반영", {
